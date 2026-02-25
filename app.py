@@ -4,10 +4,16 @@ import yfinance as yf
 from streamlit_gsheets import GSheetsConnection
 from datetime import datetime
 import time
+import pytz # ADD THIS to your requirements.txt if not already there
 
 # --- CONFIG ---
 st.set_page_config(page_title="EP Monitor", layout="wide")
 st.title("🚀 EP Stage 2 Tracker")
+
+# Help function for IST Time
+def get_now_ist():
+    ist = pytz.timezone('Asia/Kolkata')
+    return datetime.now(ist)
 
 if 'scan_results' not in st.session_state:
     st.session_state.scan_results = pd.DataFrame()
@@ -18,12 +24,11 @@ def get_2min_strategy_data(symbol):
     ticker_sym = str(symbol).strip().upper()
     if not ticker_sym.endswith(".NS"): ticker_sym += ".NS"
     try:
-        # Fetching fresh data to bypass cache
         df = yf.download(ticker_sym, period="1d", interval="2m", progress=False)
         if not df.empty:
             tp = (df['High'] + df['Low'] + df['Close']) / 3
-            current_vwap = (tp * df['Volume']).cumsum() / df['Volume'].cumsum()
-            return {'LTP': float(df['Close'].iloc[-1]), 'VWAP': float(current_vwap.iloc[-1])}
+            vwap = (tp * df['Volume']).cumsum() / df['Volume'].cumsum()
+            return {'LTP': float(df['Close'].iloc[-1]), 'VWAP': float(vwap.iloc[-1])}
     except: pass
     return {'LTP': 0.0, 'VWAP': 0.0}
 
@@ -67,7 +72,7 @@ with tab1:
                 confirmed.append({
                     'Symbol': row['Symbol'], 
                     'Entry_Price': row['Entry_Price'], 
-                    'Update_Time': datetime.now().strftime('%H:%M:%S'),
+                    'Update_Time': get_now_ist().strftime('%Y-%m-%d %H:%M:%S'),
                     'Status': 'OPEN'
                 })
         
@@ -78,13 +83,14 @@ with tab1:
                 df = conn.read(worksheet=mode, ttl=0).dropna(how='all')
                 updated = pd.concat([df, pd.DataFrame(confirmed)], ignore_index=True)
                 conn.update(worksheet=mode, data=updated)
-                st.success("Saved!")
+                st.success(f"Saved to {mode} at {get_now_ist().strftime('%H:%M:%S')} IST!")
                 st.session_state.scan_results = pd.DataFrame()
                 time.sleep(2)
                 st.rerun()
 
 with tab2:
     st.header("Intraday Monitor")
+    st.caption(f"Last Synced: {get_now_ist().strftime('%H:%M:%S')} IST")
     if st.button("🔄 Force Refresh"): st.cache_data.clear(); st.rerun()
     try:
         df_i = conn.read(worksheet="INTRADAY_PORTFOLIO", ttl=0).dropna(how='all').drop_duplicates()
@@ -100,10 +106,11 @@ with tab2:
                     s.append("🚨 EXIT" if (l_val < v_val and l_val > 0) else "✅ OK")
                 active_i['2m Close'], active_i['VWAP'], active_i['Signal'] = l, v, s
                 st.table(active_i)
-    except Exception as e: st.error(f"Waiting for Sheet: {e}")
+    except Exception as e: st.error(f"Syncing: {e}")
 
 with tab3:
     st.header("Swing Monitor")
+    st.caption(f"Last Synced: {get_now_ist().strftime('%H:%M:%S')} IST")
     if st.button("🔄 Refresh Swing"): st.cache_data.clear(); st.rerun()
     try:
         df_s = conn.read(worksheet="SWING_PORTFOLIO", ttl=0).dropna(how='all').drop_duplicates()
@@ -120,4 +127,4 @@ with tab3:
                     sig.append("🚨 SELL" if (curr < sl and curr > 0) else "✅ OK")
                 active_s['Price'], active_s['Signal'] = p, sig
                 st.table(active_s)
-    except Exception as e: st.error(f"Waiting for Sheet: {e}")
+    except Exception as e: st.error(f"Syncing: {e}")
