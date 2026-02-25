@@ -12,8 +12,8 @@ st.title("🚀 EP Stage 2 Tracker")
 # Initialize Session State
 if 'scan_results' not in st.session_state:
     st.session_state.scan_results = pd.DataFrame()
-if 'scan_stage' not in st.session_state:
-    st.session_state.scan_stage = "idle"
+if 'run_next_stage' not in st.session_state:
+    st.session_state.run_next_stage = False
 
 # Connect to Google Sheets
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -25,20 +25,17 @@ def get_live_stats(symbol):
         res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5).json()
         if res['msg'] == 'success':
             return {'LTP': float(res['data']['lastPrice']), 'VWAP': float(res['data']['averagePrice'])}
-    except:
-        pass
-    return {'LTP': 0, 'VWAP': 0}
+    except: return {'LTP': 0, 'VWAP': 0}
 
 def run_scan(threshold):
     url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
     try:
         tickers = pd.read_csv(url)['Symbol'].tolist()
-    except:
-        return pd.DataFrame()
+    except: return pd.DataFrame()
     
     results = []
     prog = st.progress(0)
-    for i, sym in enumerate(tickers[:120]): # Fast scan
+    for i, sym in enumerate(tickers[:120]):
         prog.progress(i / 120)
         try:
             t = yf.Ticker(f"{sym}.NS")
@@ -54,27 +51,40 @@ def run_scan(threshold):
     prog.empty()
     return pd.DataFrame(results)
 
+# --- CALLBACKS ---
+def trigger_3_5_scan():
+    st.session_state.run_next_stage = True
+
 # --- TABS ---
 tab1, tab2, tab3 = st.tabs(["🚀 Scanner", "💰 Intraday", "📈 Swing"])
 
 with tab1:
-    st.header("Step 1: Daily Scanner")
+    st.header("Daily Scanner")
+    
+    # Primary Scan Button
     if st.button("🎯 Run 5% Primary Scan"):
-        with st.spinner("Scanning..."):
+        st.session_state.run_next_stage = False # Reset
+        with st.spinner("Scanning for 5% Gappers..."):
             res = run_scan(5.0)
             if res.empty:
-                st.warning("No 5% gappers found. Market might be quiet.")
-                if st.button("Confirm: Run 3.5% Scan"):
-                    st.session_state.scan_results = run_scan(3.5)
-                    st.session_state.scan_stage = "results"
-                    st.rerun()
+                st.warning("No 5% gappers found.")
             else:
                 st.session_state.scan_results = res
-                st.session_state.scan_stage = "results"
-                st.rerun()
 
-    if st.session_state.scan_stage == "results":
-        st.success("Select the stocks you bought:")
+    # If 5% scan was empty, show the 3.5% trigger
+    if st.session_state.scan_results.empty:
+        st.info("Market is quiet. Would you like to run a 3.5% Strength Scan?")
+        st.button("✅ Confirm: Run 3.5% Scan", on_click=trigger_3_5_scan)
+
+    # Execute 3.5% Scan if confirmed
+    if st.session_state.run_next_stage:
+        with st.spinner("Scanning for 3.5% Strength..."):
+            st.session_state.scan_results = run_scan(3.5)
+            st.session_state.run_next_stage = False # Reset after run
+
+    # Display results if they exist
+    if not st.session_state.scan_results.empty:
+        st.success(f"Found {len(st.session_state.scan_results)} candidates:")
         confirmed = []
         for i, row in st.session_state.scan_results.iterrows():
             if st.checkbox(f"Bought {row['Symbol']} @ {row['Price']}", key=f"s_{row['Symbol']}"):
@@ -84,7 +94,6 @@ with tab1:
             mode = st.radio("Target Portfolio:", ["INTRADAY_PORTFOLIO", "SWING_PORTFOLIO"])
             if st.button("💾 Save to Ledger"):
                 try:
-                    # Logic to read/write without crashing on empty sheets
                     try:
                         old_df = conn.read(worksheet=mode, ttl=0)
                     except:
@@ -93,12 +102,11 @@ with tab1:
                     updated = pd.concat([old_df, pd.DataFrame(confirmed)], ignore_index=True)
                     conn.update(worksheet=mode, data=updated)
                     st.success(f"Committed to {mode}!")
+                    st.session_state.scan_results = pd.DataFrame() # Clear after save
                     st.balloons()
-                except:
-                    st.error("Error: Please ensure your Sheet has tabs named 'INTRADAY_PORTFOLIO' and 'SWING_PORTFOLIO'.")
+                except: st.error("Commit failed. Check tab names.")
 
 with tab2:
-    st.header("Live Intraday Monitor (VWAP)")
     try:
         df_i = conn.read(worksheet="INTRADAY_PORTFOLIO", ttl=0)
         if not df_i.empty:
@@ -110,7 +118,6 @@ with tab2:
     except: st.info("No active trades.")
 
 with tab3:
-    st.header("Live Swing Monitor (-7% SL)")
     try:
         df_s = conn.read(worksheet="SWING_PORTFOLIO", ttl=0)
         if not df_s.empty:
@@ -121,5 +128,3 @@ with tab3:
             final_s['Exit?'] = final_s.apply(lambda x: "🚨 SELL" if x['LTP'] < x['SL'] and x['LTP'] > 0 else "✅ OK", axis=1)
             st.table(final_s)
     except: st.info("No active trades.")
-
-st.caption(f"Refreshed: {datetime.now().strftime('%H:%M:%S')}")
