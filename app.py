@@ -60,7 +60,7 @@ def run_scan(threshold):
 tab1, tab2, tab3 = st.tabs(["🚀 Scanner", "💰 Intraday", "📈 Swing"])
 
 with tab1:
-    st.header("Step 1: Scanner")
+    st.header("Step 1: Daily Scanner")
     c1, c2 = st.columns(2)
     with c1:
         if st.button("🎯 Run 5% Scan"): st.session_state.scan_results = run_scan(5.0)
@@ -68,9 +68,11 @@ with tab1:
         if st.button("✅ Run 3.5% Scan"): st.session_state.scan_results = run_scan(3.5)
 
     if not st.session_state.scan_results.empty:
+        st.subheader("Scan Results")
         confirmed = []
         for i, row in st.session_state.scan_results.iterrows():
-            if st.checkbox(f"Add {row['Symbol']} (@ {row['Entry_Price']})", key=f"c_{row['Symbol']}"):
+            # Using unique keys for checkboxes to avoid conflict
+            if st.checkbox(f"Add {row['Symbol']} (@ {row['Entry_Price']})", key=f"scan_{row['Symbol']}"):
                 confirmed.append({
                     'Symbol': row['Symbol'], 
                     'Entry_Price': row['Entry_Price'], 
@@ -79,4 +81,6 @@ with tab1:
                 })
         
         if confirmed:
+            st.divider()
             mode = st.radio("Target Portfolio:", ["INTRADAY_PORTFOLIO", "SWING_PORTFOLIO"])
+            # THE RESTORED COMMIT BUTTON
