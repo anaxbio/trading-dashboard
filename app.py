@@ -14,6 +14,7 @@ if 'scan_results' not in st.session_state:
 if 'run_next_stage' not in st.session_state:
     st.session_state.run_next_stage = False
 
+# Connect via Service Account (uses Secrets)
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def get_live_stats(symbol):
@@ -75,19 +76,17 @@ with tab1:
             mode = st.radio("Target Portfolio:", ["INTRADAY_PORTFOLIO", "SWING_PORTFOLIO"])
             if st.button("💾 Commit to Ledger"):
                 try:
-                    # SAFETY: Read existing or create new if tab missing
                     try:
                         old_df = conn.read(worksheet=mode, ttl=0)
-                    except Exception:
+                    except:
                         old_df = pd.DataFrame(columns=['Symbol', 'Entry', 'Date', 'Status'])
                     
                     updated = pd.concat([old_df, pd.DataFrame(confirmed)], ignore_index=True)
                     conn.update(worksheet=mode, data=updated)
                     st.success(f"Committed to {mode}!")
-                    st.balloons()
                     st.session_state.scan_results = pd.DataFrame()
                 except Exception as e:
-                    st.error(f"Commit failed: Ensure Sheet is set to 'Anyone with link' + 'Editor'. Error: {e}")
+                    st.error(f"Commit failed: {e}")
 
 with tab2:
     try:
@@ -99,7 +98,7 @@ with tab2:
                 res_i = pd.concat([df_open.reset_index(drop=True), pd.DataFrame(stats)], axis=1)
                 res_i['Exit?'] = res_i.apply(lambda x: "🚨 EXIT" if x['LTP'] < x['VWAP'] and x['LTP'] > 0 else "✅ OK", axis=1)
                 st.table(res_i)
-    except: st.info("Intraday ledger is empty or tab missing.")
+    except: st.info("Intraday ledger is empty.")
 
 with tab3:
     try:
@@ -112,4 +111,4 @@ with tab3:
                 res_s['SL'] = res_s['Entry'] * 0.93
                 res_s['Exit?'] = res_s.apply(lambda x: "🚨 SELL" if x['LTP'] < x['SL'] and x['LTP'] > 0 else "✅ OK", axis=1)
                 st.table(res_s)
-    except: st.info("Swing ledger is empty or tab missing.")
+    except: st.info("Swing ledger is empty.")
