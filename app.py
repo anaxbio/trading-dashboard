@@ -17,33 +17,27 @@ if 'scan_results' not in st.session_state:
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def get_live_stats(symbol):
-    """Self-healing price fetcher: Cleans symbols like RELIANCE.NS automatically."""
+    """Self-healing price fetcher: Cleans symbols automatically."""
     clean_sym = str(symbol).split('.')[0].split('-')[0].strip().upper()
     try:
         url = f"https://priceapi.moneycontrol.com/pricefeed/nse/equityinst/{clean_sym}"
         headers = {'User-Agent': 'Mozilla/5.0'}
         res = requests.get(url, headers=headers, timeout=5).json()
-        
         if res.get('msg') == 'success' and 'data' in res:
-            return {
-                'LTP': float(res['data']['lastPrice']), 
-                'VWAP': float(res['data']['averagePrice'])
-            }
+            return {'LTP': float(res['data']['lastPrice']), 'VWAP': float(res['data']['averagePrice'])}
     except:
         pass
     return {'LTP': 0, 'VWAP': 0}
 
 def run_scan(threshold):
-    """Fetches Nifty 500 and scans for Stage 2 breakouts."""
+    """Scans Nifty 500 for breakouts."""
     url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
     try:
         tickers = pd.read_csv(url)['Symbol'].tolist()
     except:
         return pd.DataFrame()
-    
     results = []
     prog = st.progress(0)
-    # Scanning first 120 stocks for speed
     for i, sym in enumerate(tickers[:120]):
         prog.progress(i / 120)
         try:
@@ -75,17 +69,10 @@ with tab1:
             st.session_state.scan_results = run_scan(3.5)
 
     if not st.session_state.scan_results.empty:
-        st.subheader("Scan Results")
         confirmed = []
         for i, row in st.session_state.scan_results.iterrows():
             if st.checkbox(f"Add {row['Symbol']} (@ {row['Entry']})", key=f"check_{row['Symbol']}"):
-                confirmed.append({
-                    'Symbol': row['Symbol'], 
-                    'Entry': row['Entry'], 
-                    'Date': datetime.now().strftime('%Y-%m-%d'), 
-                    'Status': 'OPEN'
-                })
-        
+                confirmed.append({'Symbol': row['Symbol'], 'Entry': row['Entry'], 'Date': datetime.now().strftime('%Y-%m-%d'), 'Status': 'OPEN'})
         if confirmed:
             mode = st.radio("Choose Portfolio:", ["INTRADAY_PORTFOLIO", "SWING_PORTFOLIO"])
             if st.button("💾 Commit to Google Sheet"):
@@ -93,62 +80,47 @@ with tab1:
                     try:
                         old_df = conn.read(worksheet=mode, ttl=0)
                     except:
-                        # Fallback if worksheet is missing or empty
                         old_df = pd.DataFrame(columns=['Symbol', 'Entry', 'Date', 'Status'])
-                    
-                    new_entries = pd.DataFrame(confirmed)
-                    updated = pd.concat([old_df, new_entries], ignore_index=True).drop_duplicates(subset=['Symbol', 'Date'])
+                    updated = pd.concat([old_df, pd.DataFrame(confirmed)], ignore_index=True).drop_duplicates(subset=['Symbol', 'Date'])
                     conn.update(worksheet=mode, data=updated)
-                    st.success(f"Saved to {mode}!")
-                    st.session_state.scan_results = pd.DataFrame() 
+                    st.success("Saved!")
+                    st.session_state.scan_results = pd.DataFrame()
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Commit Error: {e}")
+                    st.error(f"Error: {e}")
 
 with tab2:
-    st.header("Intraday Monitor (LTP vs VWAP)")
-    if st.button("🔄 Refresh Prices", key="refresh_i"):
-        st.rerun()
-        
+    st.header("Intraday Monitor")
+    if st.button("🔄 Refresh", key="ri"): st.rerun()
     try:
         df_i = conn.read(worksheet="INTRADAY_PORTFOLIO", ttl=0)
         if not df_i.empty:
-            df_i['Status'] = df_i['Status'].astype(str).str.upper().str.strip()
-            active_i = df_i[df_i['Status'] == 'OPEN'].copy()
-            
+            active_i = df_i[df_i['Status'].astype(str).str.upper().str.strip() == 'OPEN'].copy()
             if not active_i.empty:
                 ltps, vwaps, signals = [], [], []
                 for s in active_i['Symbol']:
                     stats = get_live_stats(s)
                     ltps.append(stats['LTP'])
                     vwaps.append(stats['VWAP'])
-                    if stats['LTP'] == 0:
-                        signals.append("⚠️ API Wait")
-                    else:
-                        signals.append("🚨 EXIT" if stats['LTP'] < stats['VWAP'] else "✅ OK")
-                
-                active_i['LTP'] = ltps
-                active_i['VWAP'] = vwaps
-                active_i['Signal'] = signals
+                    signals.append("🚨 EXIT" if stats['LTP'] < stats['VWAP'] and stats['LTP'] > 0 else "✅ OK")
+                active_i['LTP'], active_i['VWAP'], active_i['Signal'] = ltps, vwaps, signals
                 st.table(active_i[['Symbol', 'Entry', 'LTP', 'VWAP', 'Signal']])
-            else:
-                st.info("No active Intraday trades.")
-    except:
-        st.info("Intraday Ledger is currently empty.")
+    except: st.info("Intraday Ledger empty.")
 
 with tab3:
-    st.header("Swing Monitor (7% Stop Loss)")
-    if st.button("🔄 Refresh Prices", key="refresh_s"):
-        st.rerun()
-
+    st.header("Swing Monitor")
+    if st.button("🔄 Refresh", key="rs"): st.rerun()
     try:
         df_s = conn.read(worksheet="SWING_PORTFOLIO", ttl=0)
         if not df_s.empty:
-            df_s['Status'] = df_s['Status'].astype(str).str.upper().str.strip()
-            active_s = df_s[df_s['Status'] == 'OPEN'].copy()
-            
+            active_s = df_s[df_s['Status'].astype(str).str.upper().str.strip() == 'OPEN'].copy()
             if not active_s.empty:
                 ltp_s, signals_s = [], []
                 for idx, row in active_s.iterrows():
                     curr_ltp = get_live_stats(row['Symbol'])['LTP']
-                    sl_
+                    sl_level = float(row['Entry']) * 0.93
+                    ltp_s.append(curr_ltp)
+                    signals_s.append("🚨 SELL" if curr_ltp < sl_level and curr_ltp > 0 else "✅ OK")
+                active_s['LTP'], active_s['Signal'] = ltp_s, signals_s
+                st.table(active_s[['Symbol', 'Entry', 'LTP', 'Signal']])
+    except: st.info("Swing Ledger empty.")
