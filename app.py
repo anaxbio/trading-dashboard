@@ -5,72 +5,74 @@ import yfinance as yf
 from streamlit_gsheets import GSheetsConnection
 from datetime import datetime
 
-st.set_page_config(page_title="EP Dashboard", layout="wide")
-st.title("🚀 EP Stage 2 Tracker (MC Primary)")
+st.set_page_config(page_title="EP Monitor", layout="wide")
+st.title("📈 EP Live Exit Monitor")
 
-# --- CONFIG ---
-# Note: In your Google Sheet, add a 'MC_ID' column if you have it. 
-# If not, we fallback to YFinance or a basic scraper.
-conn = st.connection("gsheets", type=GSheetsConnection)
-
-def get_mc_price(symbol):
-    """Hits Moneycontrol's JSON endpoint for live price & VWAP."""
+# --- DATA FETCHING (MONEYCONTROL PRIMARY) ---
+def get_live_stats(symbol):
+    """Hits MC JSON for Price/VWAP, falls back to YF if needed."""
     try:
-        # This is a common internal MC endpoint format
-        # We use a headers-spoof to ensure we aren't blocked
+        # Standard MC JSON Fetch (Primary)
         url = f"https://priceapi.moneycontrol.com/pricefeed/nse/equityinst/{symbol}"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers, timeout=5)
-        data = response.json()
-        
-        if data['msg'] == 'success':
-            price_data = data['data']
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5).json()
+        if res['msg'] == 'success':
             return {
-                'LTP': float(price_data['lastPrice']),
-                'VWAP': float(price_data['averagePrice']), # MC provides ATP/VWAP
-                'Source': 'Moneycontrol'
+                'LTP': float(res['data']['lastPrice']),
+                'VWAP': float(res['data']['averagePrice']),
+                'Src': 'MC'
             }
-    except Exception:
-        # Fallback to YFinance if MC fails or Symbol is different
-        ticker = yf.Ticker(f"{symbol}.NS")
-        df = ticker.history(period="1d", interval="2m")
+    except:
+        pass
+    
+    # Fallback to YFinance (Secondary)
+    try:
+        t = yf.Ticker(f"{symbol}.NS")
+        df = t.history(period="1d", interval="2m")
         if not df.empty:
             ltp = df['Close'].iloc[-1]
             vwap = (df['Close'] * df['Volume']).sum() / df['Volume'].sum()
-            return {'LTP': round(ltp, 2), 'VWAP': round(vwap, 2), 'Source': 'YFinance (Fallback)'}
-    return {'LTP': 0, 'VWAP': 0, 'Source': 'Error'}
+            return {'LTP': round(ltp, 2), 'VWAP': round(vwap, 2), 'Src': 'YF'}
+    except:
+        return {'LTP': 0, 'VWAP': 0, 'Src': 'ERR'}
 
-# --- UPLOAD SECTION ---
-st.sidebar.header("Upload Stoxkart P&L")
-uploaded_file = st.sidebar.file_uploader("Upload Excel", type=['xlsx'])
+# --- UI: FILE UPLOAD ---
+st.sidebar.header("Sync Broker Data")
+file = st.sidebar.file_uploader("Upload Stoxkart P&L", type=['csv', 'xlsx'])
 
-# --- MONITORING LOGIC ---
-tab1, tab2 = st.tabs(["💰 Intraday (5x)", "📈 Swing (Cash)"])
+if file:
+    df = pd.read_csv(file) if file.name.endswith('.csv') else pd.read_excel(file)
+    
+    # FILTER: Only show active trades (where you haven't sold everything yet)
+    # Stoxkart P&L usually has 'Quantity' or 'Net Qty'
+    active_trades = df[df['Realized P&L'].isnull() | (df['Realized P&L'] == 0)].copy()
 
-with tab1:
-    st.header("Intraday: 2m VWAP Pulse")
-    df_intra = conn.read(worksheet="INTRADAY_PORTFOLIO")
-    if not df_intra.empty:
-        results = []
-        for sym in df_intra['Symbol']:
-            results.append(get_mc_price(sym))
+    if not active_trades.empty:
+        st.subheader("⚠️ Active Risk Monitor")
         
-        df_live = pd.DataFrame(results)
-        df_final = pd.concat([df_intra.reset_index(drop=True), df_live], axis=1)
+        # Pull Live Data
+        monitor_list = []
+        for sym in active_trades['Symbol']:
+            stats = get_live_stats(sym)
+            monitor_list.append(stats)
         
-        # 2-Min Buffer Logic
-        df_final['Status'] = df_final.apply(lambda x: "🚨 EXIT" if x['LTP'] < x['VWAP'] else "✅ HOLD", axis=1)
-        st.table(df_final[['Symbol', 'Entry_Price', 'LTP', 'VWAP', 'Status', 'Source']])
+        live_df = pd.DataFrame(monitor_list)
+        final_df = pd.concat([active_trades.reset_index(drop=True), live_df], axis=1)
+        
+        # --- THE EXIT DECIDER ---
+        def decide(row):
+            # Intraday Check (If 5x margin assumed)
+            if row['LTP'] < row['VWAP']:
+                return "🚨 EXIT (VWAP Break)"
+            # Swing Check (7% Stop)
+            if row['LTP'] < (row['Buy Average'] * 0.93):
+                return "🚨 SELL (SL Hit)"
+            return "✅ HOLD"
 
-with tab2:
-    st.header("Swing: -7% Hard Stop")
-    df_swing = conn.read(worksheet="SWING_PORTFOLIO")
-    if not df_swing.empty:
-        # Similar fetch logic for Swing
-        results_s = [get_mc_price(s) for s in df_swing['Symbol']]
-        df_live_s = pd.DataFrame(results_s)
-        df_final_s = pd.concat([df_swing.reset_index(drop=True), df_live_s], axis=1)
+        final_df['Action'] = final_df.apply(decide, axis=1)
         
-        df_final_s['SL_Price'] = df_final_s['Entry_Price'] * 0.93
-        df_final_s['Status'] = df_final_s.apply(lambda x: "🚨 SELL" if x['LTP'] < x['SL_Price'] else "✅ OK", axis=1)
-        st.table(df_final_s[['Symbol', 'Entry_Price', 'SL_Price', 'LTP', 'Status']])
+        # Display the "Lite" Table
+        st.table(final_df[['Symbol', 'Buy Average', 'LTP', 'VWAP', 'Action', 'Src']])
+    else:
+        st.success("All trades closed. No active risk.")
+
+st.caption(f"Refreshed: {datetime.now().strftime('%H:%M:%S')} | Logic: 2m Candle Close Buffer")
