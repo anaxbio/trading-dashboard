@@ -18,13 +18,14 @@ def get_2min_strategy_data(symbol):
     ticker_sym = str(symbol).strip().upper()
     if not ticker_sym.endswith(".NS"): ticker_sym += ".NS"
     try:
+        # Fetching fresh data to bypass cache
         df = yf.download(ticker_sym, period="1d", interval="2m", progress=False)
         if not df.empty:
             tp = (df['High'] + df['Low'] + df['Close']) / 3
-            vwap = (tp * df['Volume']).cumsum() / df['Volume'].cumsum()
-            return {'LTP': round(df['Close'].iloc[-1], 2), 'VWAP': round(vwap.iloc[-1], 2)}
+            current_vwap = (tp * df['Volume']).cumsum() / df['Volume'].cumsum()
+            return {'LTP': float(df['Close'].iloc[-1]), 'VWAP': float(current_vwap.iloc[-1])}
     except: pass
-    return {'LTP': 0, 'VWAP': 0}
+    return {'LTP': 0.0, 'VWAP': 0.0}
 
 def run_scan(threshold):
     url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
@@ -74,7 +75,6 @@ with tab1:
             mode = st.radio("Target Portfolio:", ["INTRADAY_PORTFOLIO", "SWING_PORTFOLIO"])
             if st.button("💾 Commit Trades"):
                 st.cache_data.clear()
-                # Read with NO safety net to see the real error
                 df = conn.read(worksheet=mode, ttl=0).dropna(how='all')
                 updated = pd.concat([df, pd.DataFrame(confirmed)], ignore_index=True)
                 conn.update(worksheet=mode, data=updated)
@@ -85,39 +85,39 @@ with tab1:
 
 with tab2:
     st.header("Intraday Monitor")
-    # NO try/except block here so we can see the real error message
-    df_i = conn.read(worksheet="INTRADAY_PORTFOLIO", ttl=0).dropna(how='all')
-    if not df_i.empty:
-        # Check if 'Status' column exists
-        if 'Status' in df_i.columns:
+    if st.button("🔄 Force Refresh"): st.cache_data.clear(); st.rerun()
+    try:
+        df_i = conn.read(worksheet="INTRADAY_PORTFOLIO", ttl=0).dropna(how='all').drop_duplicates()
+        if not df_i.empty and 'Status' in df_i.columns:
             df_i['Status'] = df_i['Status'].astype(str).str.upper().str.strip()
             active_i = df_i[df_i['Status'] == 'OPEN'].copy()
             if not active_i.empty:
                 l, v, s = [], [], []
                 for sym in active_i['Symbol']:
                     res = get_2min_strategy_data(sym)
-                    l.append(res['LTP']); v.append(res['VWAP'])
-                    s.append("🚨 EXIT" if res['LTP'] < res['VWAP'] and res['LTP'] > 0 else "✅ OK")
+                    l_val, v_val = float(res['LTP']), float(res['VWAP'])
+                    l.append(l_val); v.append(v_val)
+                    s.append("🚨 EXIT" if (l_val < v_val and l_val > 0) else "✅ OK")
                 active_i['2m Close'], active_i['VWAP'], active_i['Signal'] = l, v, s
                 st.table(active_i)
-        else:
-            st.error("Missing 'Status' column in INTRADAY_PORTFOLIO sheet.")
+    except Exception as e: st.error(f"Waiting for Sheet: {e}")
 
 with tab3:
     st.header("Swing Monitor")
-    df_s = conn.read(worksheet="SWING_PORTFOLIO", ttl=0).dropna(how='all')
-    if not df_s.empty:
-        if 'Status' in df_s.columns:
+    if st.button("🔄 Refresh Swing"): st.cache_data.clear(); st.rerun()
+    try:
+        df_s = conn.read(worksheet="SWING_PORTFOLIO", ttl=0).dropna(how='all').drop_duplicates()
+        if not df_s.empty and 'Status' in df_s.columns:
             df_s['Status'] = df_s['Status'].astype(str).str.upper().str.strip()
             active_s = df_s[df_s['Status'] == 'OPEN'].copy()
             if not active_s.empty:
                 p, sig = [], []
                 for idx, row in active_s.iterrows():
-                    curr = get_2min_strategy_data(row['Symbol'])['LTP']
+                    res = get_2min_strategy_data(row['Symbol'])
+                    curr = float(res['LTP'])
                     sl = float(row['Entry_Price']) * 0.93
                     p.append(curr)
-                    sig.append("🚨 SELL" if curr < sl and curr > 0 else "✅ OK")
+                    sig.append("🚨 SELL" if (curr < sl and curr > 0) else "✅ OK")
                 active_s['Price'], active_s['Signal'] = p, sig
                 st.table(active_s)
-        else:
-            st.error("Missing 'Status' column in SWING_PORTFOLIO sheet.")
+    except Exception as e: st.error(f"Waiting for Sheet: {e}")
