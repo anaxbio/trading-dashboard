@@ -4,13 +4,13 @@ import yfinance as yf
 from streamlit_gsheets import GSheetsConnection
 from datetime import datetime
 import time
-import pytz # ADD THIS to your requirements.txt if not already there
+import pytz
 
 # --- CONFIG ---
 st.set_page_config(page_title="EP Monitor", layout="wide")
 st.title("🚀 EP Stage 2 Tracker")
 
-# Help function for IST Time
+# Helper function for IST Time
 def get_now_ist():
     ist = pytz.timezone('Asia/Kolkata')
     return datetime.now(ist)
@@ -20,6 +20,7 @@ if 'scan_results' not in st.session_state:
 
 conn = st.connection("gsheets", type=GSheetsConnection)
 
+# --- CORE FUNCTIONS ---
 def get_2min_strategy_data(symbol):
     ticker_sym = str(symbol).strip().upper()
     if not ticker_sym.endswith(".NS"): ticker_sym += ".NS"
@@ -55,6 +56,7 @@ def run_scan(threshold):
     prog.empty()
     return pd.DataFrame(results)
 
+# --- UI TABS ---
 tab1, tab2, tab3 = st.tabs(["🚀 Scanner", "💰 Intraday", "📈 Swing"])
 
 with tab1:
@@ -78,53 +80,3 @@ with tab1:
         
         if confirmed:
             mode = st.radio("Target Portfolio:", ["INTRADAY_PORTFOLIO", "SWING_PORTFOLIO"])
-            if st.button("💾 Commit Trades"):
-                st.cache_data.clear()
-                df = conn.read(worksheet=mode, ttl=0).dropna(how='all')
-                updated = pd.concat([df, pd.DataFrame(confirmed)], ignore_index=True)
-                conn.update(worksheet=mode, data=updated)
-                st.success(f"Saved to {mode} at {get_now_ist().strftime('%H:%M:%S')} IST!")
-                st.session_state.scan_results = pd.DataFrame()
-                time.sleep(2)
-                st.rerun()
-
-with tab2:
-    st.header("Intraday Monitor")
-    st.caption(f"Last Synced: {get_now_ist().strftime('%H:%M:%S')} IST")
-    if st.button("🔄 Force Refresh"): st.cache_data.clear(); st.rerun()
-    try:
-        df_i = conn.read(worksheet="INTRADAY_PORTFOLIO", ttl=0).dropna(how='all').drop_duplicates()
-        if not df_i.empty and 'Status' in df_i.columns:
-            df_i['Status'] = df_i['Status'].astype(str).str.upper().str.strip()
-            active_i = df_i[df_i['Status'] == 'OPEN'].copy()
-            if not active_i.empty:
-                l, v, s = [], [], []
-                for sym in active_i['Symbol']:
-                    res = get_2min_strategy_data(sym)
-                    l_val, v_val = float(res['LTP']), float(res['VWAP'])
-                    l.append(l_val); v.append(v_val)
-                    s.append("🚨 EXIT" if (l_val < v_val and l_val > 0) else "✅ OK")
-                active_i['2m Close'], active_i['VWAP'], active_i['Signal'] = l, v, s
-                st.table(active_i)
-    except Exception as e: st.error(f"Syncing: {e}")
-
-with tab3:
-    st.header("Swing Monitor")
-    st.caption(f"Last Synced: {get_now_ist().strftime('%H:%M:%S')} IST")
-    if st.button("🔄 Refresh Swing"): st.cache_data.clear(); st.rerun()
-    try:
-        df_s = conn.read(worksheet="SWING_PORTFOLIO", ttl=0).dropna(how='all').drop_duplicates()
-        if not df_s.empty and 'Status' in df_s.columns:
-            df_s['Status'] = df_s['Status'].astype(str).str.upper().str.strip()
-            active_s = df_s[df_s['Status'] == 'OPEN'].copy()
-            if not active_s.empty:
-                p, sig = [], []
-                for idx, row in active_s.iterrows():
-                    res = get_2min_strategy_data(row['Symbol'])
-                    curr = float(res['LTP'])
-                    sl = float(row['Entry_Price']) * 0.93
-                    p.append(curr)
-                    sig.append("🚨 SELL" if (curr < sl and curr > 0) else "✅ OK")
-                active_s['Price'], active_s['Signal'] = p, sig
-                st.table(active_s)
-    except Exception as e: st.error(f"Syncing: {e}")
