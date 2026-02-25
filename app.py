@@ -110,7 +110,7 @@ with tab2:
     with st.expander("📥 Sync Stoxkart Entry Prices"):
         up_file = st.file_uploader("Upload Broker Report (XLSX)", type=['xlsx'], key="stox_i")
         if up_file:
-            st.info("File Uploaded - Awaiting Column Mapping.")
+            st.info("File Uploaded - Column mapping logic needed.")
 
     st.caption(f"Sync: {get_now_ist().strftime('%H:%M:%S')} IST")
     if st.button("🔄 Refresh Data", key="ri"): st.cache_data.clear(); st.rerun()
@@ -124,5 +124,65 @@ with tab2:
                 l, v, s = [], [], []
                 for sym in active_i['Symbol']:
                     res = get_2min_strategy_data(sym)
-                    l.append(res['LTP']); v.append(res['VWAP'])
-                    s.append("🚨 EXIT"
+                    l.append(res['LTP'])
+                    v.append(res['VWAP'])
+                    # --- FIXED PARENTHESIS HERE ---
+                    s.append("🚨 EXIT" if (res['LTP'] < res['VWAP'] and res['LTP'] > 0) else "✅ OK")
+                
+                active_i['LTP'], active_i['VWAP'], active_i['Signal'] = l, v, s
+                st.table(active_i[['Symbol', 'Entry_Price', 'LTP', 'VWAP', 'Signal', 'Date']])
+                
+                sel = st.selectbox("Select Trade to Close:", ["None"] + active_i['Symbol'].tolist(), key="ci")
+                if sel != "None":
+                    if st.button("Confirm Close & Record P&L", key="confirm_ci"):
+                        exit_data = get_2min_strategy_data(sel)
+                        exit_p = exit_data['LTP']
+                        entry_p = float(df_i.loc[df_i['Symbol'] == sel, 'Entry_Price'].iloc[0])
+                        pnl = round(((exit_p - entry_p) / entry_p) * 100, 2)
+                        
+                        df_i.loc[df_i['Symbol'] == sel, 'Status'] = 'CLOSED'
+                        df_i.loc[df_i['Symbol'] == sel, 'Exit_Price'] = exit_p
+                        df_i.loc[df_i['Symbol'] == sel, 'PnL_Pct'] = pnl
+                        conn.update(worksheet="INTRADAY_PORTFOLIO", data=df_i)
+                        st.success(f"Closed {sel} at {exit_p} ({pnl}%)")
+                        time.sleep(1)
+                        st.rerun()
+    except Exception as e: st.info(f"Intraday: {e}")
+
+# TAB 3: SWING
+with tab3:
+    st.header("Swing Monitor")
+    st.caption(f"Sync: {get_now_ist().strftime('%H:%M:%S')} IST")
+    if st.button("🔄 Refresh Data", key="rs"): st.cache_data.clear(); st.rerun()
+    
+    try:
+        df_s = conn.read(worksheet="SWING_PORTFOLIO", ttl=0).dropna(how='all')
+        if not df_s.empty:
+            df_s['Status'] = df_s['Status'].astype(str).str.upper().str.strip()
+            active_s = df_s[df_s['Status'] == 'OPEN'].copy()
+            if not active_s.empty:
+                p, sig = [], []
+                for sym in active_s['Symbol']:
+                    curr = get_2min_strategy_data(sym)['LTP']
+                    p.append(curr)
+                    e_val = float(active_s.loc[active_s['Symbol']==sym, 'Entry_Price'].iloc[0])
+                    sig.append("🚨 SELL" if (curr < e_val*0.93 and curr > 0) else "✅ OK")
+                
+                active_s['Price'], active_s['Signal'] = p, sig
+                st.table(active_s[['Symbol', 'Entry_Price', 'Price', 'Signal', 'Date']])
+                
+                sel_s = st.selectbox("Select Trade to Close:", ["None"] + active_s['Symbol'].tolist(), key="cs")
+                if sel_s != "None":
+                    if st.button("Confirm Close Swing", key="confirm_cs"):
+                        ex_s = get_2min_strategy_data(sel_s)['LTP']
+                        en_s = float(df_s.loc[df_s['Symbol'] == sel_s, 'Entry_Price'].iloc[0])
+                        p_s = round(((ex_s - en_s) / en_s) * 100, 2)
+                        
+                        df_s.loc[df_s['Symbol'] == sel_s, 'Status'] = 'CLOSED'
+                        df_s.loc[df_s['Symbol'] == sel_s, 'Exit_Price'] = ex_s
+                        df_s.loc[df_s['Symbol'] == sel_s, 'PnL_Pct'] = p_s
+                        conn.update(worksheet="SWING_PORTFOLIO", data=df_s)
+                        st.success(f"Closed {sel_s}!")
+                        time.sleep(1)
+                        st.rerun()
+    except Exception as e: st.info(f"Swing: {e}")
