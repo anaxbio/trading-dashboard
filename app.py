@@ -40,8 +40,8 @@ def run_scan(threshold):
     except: return pd.DataFrame()
     results = []
     prog = st.progress(0)
-   for i, sym in enumerate(tickers):
-        prog.progress(i / 120)
+   for i, sym in enumerate(tickers[:500]):
+        prog.progress(i / 500)
         try:
             t = yf.Ticker(f"{sym}.NS")
             hist = t.history(period="1y")
