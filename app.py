@@ -48,27 +48,27 @@ def run_scan(threshold):
         prog.progress(i / total)
         try:
             t = yf.Ticker(f"{sym}.NS")
-            # Fetch 2 days to compare High vs Prev Close
-            hist = t.history(period="2d") 
+            # Fetching 2 days to compare Today's High vs Yesterday's Close
+            hist = t.history(period="5d") 
             if len(hist) >= 2:
-                prev_close = hist['Close'].iloc[-2]
-                day_high = hist['High'].iloc[-1]
-                curr_price = hist['Close'].iloc[-1]
-                
-                # Check Stage 2 (Price > 200 SMA)
+                # Stage 2 Check (200 SMA)
                 full_hist = t.history(period="1y")
                 sma200 = full_hist['Close'].rolling(200).mean().iloc[-1]
                 
-                # SENSE CHECK: Did it hit the threshold at ANY point today?
-                max_chg = ((day_high - prev_close) / prev_close) * 100
-                curr_chg = ((curr_price - prev_close) / prev_close) * 100
+                prev_close = hist['Close'].iloc[-2]
+                curr_high = hist['High'].iloc[-1]
+                curr_price = hist['Close'].iloc[-1]
                 
-                if curr_price > (sma200 * 0.98) and max_chg >= threshold:
+                # EP Logic: Did it hit the threshold at ANY point today?
+                max_day_chg = ((curr_high - prev_close) / prev_close) * 100
+                current_chg = ((curr_price - prev_close) / prev_close) * 100
+                
+                if curr_price > (sma200 * 0.98) and max_day_chg >= threshold:
                     results.append({
                         'Symbol': sym, 
                         'Entry_Price': round(curr_price, 2), 
-                        'Day_High%': round(max_chg, 2),
-                        'Current%': round(curr_chg, 2)
+                        'Day_High%': round(max_day_chg, 2),
+                        'Current%': round(current_chg, 2)
                     })
         except: continue
     prog.empty()
