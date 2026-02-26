@@ -10,17 +10,14 @@ import pytz
 st.set_page_config(page_title="EP Monitor", layout="wide")
 st.title("🚀 EP Stage 2 Dashboard")
 
-# Helper function for IST Time
 def get_now_ist():
     return datetime.now(pytz.timezone('Asia/Kolkata'))
 
-# Persistent state for scanner
 if 'scan_results' not in st.session_state:
     st.session_state.scan_results = pd.DataFrame()
 
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# --- CORE FUNCTIONS ---
 def get_2min_strategy_data(symbol):
     ticker_sym = str(symbol).strip().upper()
     if not ticker_sym.endswith(".NS"): ticker_sym += ".NS"
@@ -40,11 +37,9 @@ def run_scan(threshold):
     except: return pd.DataFrame()
     results = []
     prog = st.progress(0)
-    
-    # --- FIXED: Scanning the full Nifty 500 universe ---
-    total_tickers = len(tickers)
+    total = len(tickers)
     for i, sym in enumerate(tickers):
-        prog.progress(i / total_tickers)
+        prog.progress(i / total)
         try:
             t = yf.Ticker(f"{sym}.NS")
             hist = t.history(period="1y")
@@ -59,10 +54,8 @@ def run_scan(threshold):
     prog.empty()
     return pd.DataFrame(results)
 
-# --- UI TABS ---
 tab1, tab2, tab3 = st.tabs(["🚀 Scanner", "💰 Intraday", "📈 Swing"])
 
-# TAB 1: SCANNER & COMMIT
 with tab1:
     st.header("Step 1: Daily Scanner")
     c1, c2 = st.columns(2)
@@ -74,28 +67,66 @@ with tab1:
             st.session_state.scan_results = run_scan(3.5)
 
     if not st.session_state.scan_results.empty:
-        st.subheader("Selection & Commit")
         with st.form("commit_form"):
             confirmed = []
             for i, row in st.session_state.scan_results.iterrows():
-                sel = st.checkbox(f"Add {row['Symbol']} (@ {row['Entry_Price']})", key=f"scan_{row['Symbol']}")
-                if sel:
+                if st.checkbox(f"Add {row['Symbol']} (@ {row['Entry_Price']})", key=f"s_{row['Symbol']}"):
                     confirmed.append({
-                        'Symbol': row['Symbol'], 
-                        'Entry_Price': row['Entry_Price'], 
-                        'Date': get_now_ist().strftime('%Y-%m-%d %H:%M:%S'),
-                        'Status': 'OPEN',
-                        'Exit_Price': 0.0,
-                        'PnL_Pct': 0.0
+                        'Symbol': row['Symbol'], 'Entry_Price': row['Entry_Price'], 
+                        'Date': get_now_ist().strftime('%Y-%m-%d %H:%M:%S'), 'Status': 'OPEN'
                     })
-            
             mode = st.radio("Target Portfolio:", ["INTRADAY_PORTFOLIO", "SWING_PORTFOLIO"])
-            submit = st.form_submit_button("💾 COMMIT SELECTED TRADES")
-            
-            if submit:
-                if not confirmed:
-                    st.warning("Please select a stock.")
-                else:
+            if st.form_submit_button("💾 COMMIT TRADES"):
+                if confirmed:
                     try:
-                        st.cache_data.clear()
                         df = conn.read(worksheet=mode, ttl=0).dropna(how='all')
+                        updated = pd.concat([df, pd.DataFrame(confirmed)], ignore_index=True)
+                        conn.update(worksheet=mode, data=updated)
+                        st.success("Committed!")
+                        st.session_state.scan_results = pd.DataFrame()
+                        time.sleep(1); st.rerun()
+                    except Exception as e: st.error(f"Error: {e}")
+
+with tab2:
+    st.header("Intraday Monitor")
+    st.caption(f"Sync: {get_now_ist().strftime('%H:%M:%S')} IST")
+    if st.button("🔄 Refresh", key="ri"): st.cache_data.clear(); st.rerun()
+    try:
+        df_i = conn.read(worksheet="INTRADAY_PORTFOLIO", ttl=0).dropna(how='all')
+        active_i = df_i[df_i['Status'].astype(str).str.upper().str.strip() == 'OPEN'].copy()
+        if not active_i.empty:
+            l, v, s = [], [], []
+            for sym in active_i['Symbol']:
+                res = get_2min_strategy_data(sym)
+                l.append(res['LTP']); v.append(res['VWAP'])
+                s.append("🚨 EXIT" if (res['LTP'] < res['VWAP'] and res['LTP'] > 0) else "✅ OK")
+            active_i['LTP'], active_i['VWAP'], active_i['Signal'] = l, v, s
+            st.table(active_i)
+            sel = st.selectbox("Close Trade:", ["None"] + active_i['Symbol'].tolist(), key="ci")
+            if sel != "None" and st.button("Confirm Close"):
+                df_i.loc[df_i['Symbol'] == sel, 'Status'] = 'CLOSED'
+                conn.update(worksheet="INTRADAY_PORTFOLIO", data=df_i)
+                st.rerun()
+    except: st.info("Intraday Empty")
+
+with tab3:
+    st.header("Swing Monitor")
+    if st.button("🔄 Refresh", key="rs"): st.cache_data.clear(); st.rerun()
+    try:
+        df_s = conn.read(worksheet="SWING_PORTFOLIO", ttl=0).dropna(how='all')
+        active_s = df_s[df_s['Status'].astype(str).str.upper().str.strip() == 'OPEN'].copy()
+        if not active_s.empty:
+            p, sig = [], []
+            for sym in active_s['Symbol']:
+                curr = get_2min_strategy_data(sym)['LTP']
+                p.append(curr)
+                e_v = float(active_s.loc[active_s['Symbol']==sym, 'Entry_Price'].iloc[0])
+                sig.append("🚨 SELL" if (curr < e_v*0.93 and curr > 0) else "✅ OK")
+            active_s['Price'], active_s['Signal'] = p, sig
+            st.table(active_s)
+            sel_s = st.selectbox("Close Trade:", ["None"] + active_s['Symbol'].tolist(), key="cs")
+            if sel_s != "None" and st.button("Confirm Close Swing"):
+                df_s.loc[df_s['Symbol'] == sel_s, 'Status'] = 'CLOSED'
+                conn.update(worksheet="SWING_PORTFOLIO", data=df_s)
+                st.rerun()
+    except: st.info("Swing Empty")
