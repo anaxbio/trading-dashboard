@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 from streamlit_gsheets import GSheetsConnection
-from datetime import datetime
+from datetime import datetime, time as dtime
 import time
 import pytz
 from concurrent.futures import ThreadPoolExecutor
@@ -13,6 +13,16 @@ st.title("🛡️ EP Strategy: Intraday 5X vs. Stage 2 Swing")
 
 def get_now_ist():
     return datetime.now(pytz.timezone('Asia/Kolkata'))
+
+def is_market_open():
+    """Checks if the Indian Stock Market is currently trading."""
+    now = get_now_ist()
+    # Weekends: Saturday (5), Sunday (6)
+    if now.weekday() >= 5: return False
+    # Standard Hours: 09:15 to 15:30
+    mkt_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
+    mkt_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    return mkt_start <= now <= mkt_end
 
 conn = st.connection("gsheets", type=GSheetsConnection)
 
@@ -30,7 +40,6 @@ def get_vwap_data(sym):
     except: return 0.0, 0.0, 0.0
 
 def get_swing_stops(sym):
-    """Calculates Hard and Trailing SL for Swing trades."""
     try:
         t = yf.Ticker(f"{sym}.NS")
         hist = t.history(period="50d")
@@ -49,29 +58,24 @@ def process_ticker(sym, threshold, use_sma_wall):
         curr_p = hist['Close'].iloc[-1]
         sma200 = hist['Close'].rolling(200).mean().iloc[-1]
         dist_from_wall = ((curr_p - sma200) / sma200) * 100
-        
-        # Strictly apply the Wall for Swing tab
         if use_sma_wall and curr_p < (sma200 * 0.98): return None
-        
         prev_c = hist['Close'].iloc[-2]
         day_h = hist['High'].iloc[-1]
         max_chg = ((day_h - prev_c) / prev_c) * 100
         avg_vol = hist['Volume'].tail(30).mean()
-        rvol = hist['Volume'].iloc[-1] / avg_vol
-        
+        rvol = hist['Volume'].iloc[-1] / (avg_vol if avg_vol > 0 else 1)
         if max_chg >= threshold and rvol > 1.2:
-            return {
-                'Symbol': sym, 'LTP': round(curr_p, 2), 
-                'Max%': round(max_chg, 2), 'RVOL': round(rvol, 1), 
-                'Dist_Wall%': round(dist_from_wall, 2)
-            }
+            return {'Symbol': sym, 'LTP': round(curr_p, 2), 'Max%': round(max_chg, 2), 'RVOL': round(rvol, 1), 'Dist_Wall%': round(dist_from_wall, 2)}
     except: pass
     return None
 
-def run_engine(threshold, use_sma_wall):
-    url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+def run_engine(threshold, use_sma_wall, universe="Nifty 500"):
+    urls = {
+        "Nifty 500": "https://archives.nseindia.com/content/indices/ind_nifty500list.csv",
+        "Microcap 250": "https://archives.nseindia.com/content/indices/ind_niftymicrocap250list.csv"
+    }
     try:
-        tickers = pd.read_csv(url)['Symbol'].tolist()
+        tickers = pd.read_csv(urls.get(universe, urls["Nifty 500"]))['Symbol'].tolist()
     except: return pd.DataFrame()
     results = []
     prog = st.progress(0)
@@ -120,9 +124,18 @@ with tab1:
                 time.sleep(1); st.rerun()
 
     st.write("---")
-    st.subheader("Step 2: 5X Leverage Monitor")
     @st.fragment(run_every="120s")
     def live_intra():
+        if not is_market_open():
+            st.info("🌙 Indian Market is Closed. Auto-refresh paused.")
+            try:
+                df = conn.read(worksheet="INTRADAY_PORTFOLIO", ttl=0).dropna(how='all')
+                active = df[df['Status'].astype(str).str.upper() == 'OPEN'].copy()
+                if not active.empty: st.table(active[['Symbol', 'Entry_Price', 'Date']])
+            except: pass
+            return
+
+        st.caption(f"Next Live Sync: {get_now_ist().strftime('%H:%M:%S')}")
         try:
             df = conn.read(worksheet="INTRADAY_PORTFOLIO", ttl=0).dropna(how='all')
             active = df[df['Status'].astype(str).str.upper() == 'OPEN'].copy()
@@ -139,21 +152,26 @@ with tab1:
 
 # --- TAB 2: STAGE 2 SWING ---
 with tab2:
-    st.subheader("Step 1: Swing Engine (₹1 Lakh Model)")
-    if st.button("🚀 Scan for Swing Leaders"):
-        st.session_state.swing_results = run_engine(5.0, use_sma_wall=True)
+    st.subheader("Step 1: Swing Engine")
+    universe_choice = st.radio("Target Universe:", ["Nifty 500", "Microcap 250"], horizontal=True)
+    budget = 20000 if universe_choice == "Nifty 500" else 10000
+    
+    if st.button(f"🚀 Scan {universe_choice} Leaders"):
+        st.session_state.swing_results = run_engine(5.0, use_sma_wall=True, universe=universe_choice)
     
     if 'swing_results' in st.session_state and not st.session_state.swing_results.empty:
         df_s = st.session_state.swing_results
-        df_s['Qty_for_20k'] = (20000 / df_s['LTP']).astype(int)
-        cols_s = [c for c in ['Rank', 'Symbol', 'LTP', 'Dist_Wall%', 'Qty_for_20k'] if c in df_s.columns]
+        df_s['Qty_Suggested'] = (budget / df_s['LTP']).astype(int)
+        st.write(f"### {universe_choice} Analysis (₹{budget} per stock)")
+        cols_s = [c for c in ['Rank', 'Symbol', 'LTP', 'Dist_Wall%', 'Qty_Suggested'] if c in df_s.columns]
         st.table(df_s[cols_s])
         
         with st.form("swing_commit"):
             confirmed_s = []
             for i, row in df_s.iterrows():
                 if row.get('Rank') == "🔥 LEADER":
-                    if st.checkbox(f"Invest ₹20k in {row['Symbol']} ({row.get('Qty_for_20k', 0)} shares)", key=f"sw_{row['Symbol']}"):
+                    qty = row.get('Qty_Suggested', 0)
+                    if st.checkbox(f"Allocate ₹{budget} to {row['Symbol']} ({qty} shares)", key=f"sw_{row['Symbol']}"):
                         confirmed_s.append({'Symbol': row['Symbol'], 'Entry_Price': row['LTP'], 'Date': get_now_ist().strftime('%Y-%m-%d'), 'Status': 'OPEN'})
             if st.form_submit_button("💾 COMMIT SWING LEADERS"):
                 df_cur_s = conn.read(worksheet="SWING_PORTFOLIO", ttl=0).dropna(how='all')
@@ -173,4 +191,5 @@ with tab2:
                 pnl = ((ltp - float(r['Entry_Price'])) / float(r['Entry_Price'])) * 100
                 sw_monitor.append({"Symbol": r['Symbol'], "Entry": r['Entry_Price'], "LTP": ltp, "P&L%": f"{round(pnl, 2)}%", "HARD SL": hard, "TRAIL SL": trail})
             st.table(pd.DataFrame(sw_monitor))
+        else: st.info("Swing portfolio empty.")
     except: pass
