@@ -179,17 +179,36 @@ with tab2:
                 st.success("Swing Leaders committed!")
                 time.sleep(1); st.rerun()
 
-    st.write("---")
+st.write("---")
     st.subheader("Step 2: Swing Risk Guard")
+    
+    # NEW: Total Lockdown check for Swing pings
+    market_is_active = is_market_open()
+    
     try:
         df_sw = conn.read(worksheet="SWING_PORTFOLIO", ttl=0).dropna(how='all')
         active_sw = df_sw[df_sw['Status'].astype(str).str.upper() == 'OPEN'].copy()
+        
         if not active_sw.empty:
-            sw_monitor = []
-            for _, r in active_sw.iterrows():
-                hard, trail, ltp = get_swing_stops(r['Symbol'])
-                pnl = ((ltp - float(r['Entry_Price'])) / float(r['Entry_Price'])) * 100
-                sw_monitor.append({"Symbol": r['Symbol'], "Entry": r['Entry_Price'], "LTP": ltp, "P&L%": f"{round(pnl, 2)}%", "HARD SL": hard, "TRAIL SL": trail})
-            st.table(pd.DataFrame(sw_monitor))
-        else: st.info("Swing portfolio empty.")
-    except: pass
+            if not market_is_active:
+                st.info("🌙 Market is Closed. Showing last recorded Entry Prices. (Pings Paused)")
+                st.table(active_sw[['Symbol', 'Entry_Price', 'Date']])
+            else:
+                sw_monitor = []
+                for _, r in active_sw.iterrows():
+                    # This loop ONLY runs during 9:15 - 3:30 IST
+                    hard, trail, ltp = get_swing_stops(r['Symbol'])
+                    pnl = ((ltp - float(r['Entry_Price'])) / float(r['Entry_Price'])) * 100
+                    sw_monitor.append({
+                        "Symbol": r['Symbol'], 
+                        "Entry": r['Entry_Price'], 
+                        "LTP": ltp, 
+                        "P&L%": f"{round(pnl, 2)}%", 
+                        "HARD SL": hard, 
+                        "TRAIL SL": trail
+                    })
+                st.table(pd.DataFrame(sw_monitor))
+        else:
+            st.info("Swing portfolio empty.")
+    except Exception as e:
+        st.error(f"Error accessing Swing Portfolio: {e}")
