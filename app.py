@@ -16,7 +16,6 @@ def get_now_ist():
 
 def is_market_open():
     now = get_now_ist()
-    # 5 = Saturday, 6 = Sunday
     if now.weekday() >= 5: return False
     mkt_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
     mkt_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
@@ -121,75 +120,14 @@ with tab1:
             if st.form_submit_button("💾 COMMIT TO 5X PORTFOLIO"):
                 df_cur = conn.read(worksheet="INTRADAY_PORTFOLIO", ttl=0).dropna(how='all')
                 conn.update(worksheet="INTRADAY_PORTFOLIO", data=pd.concat([df_cur, pd.DataFrame(confirmed)], ignore_index=True))
-                st.success("Committed!")
-                time.sleep(1); st.rerun()
+                st.success("Committed!"); time.sleep(1); st.rerun()
 
     st.write("---")
     @st.fragment(run_every="120s")
     def live_intra():
         if not is_market_open():
-            st.info("🌙 Market Closed. Refresh Paused.")
+            st.info("😴 Market Closed. Refresh Paused.")
             return
         try:
             df = conn.read(worksheet="INTRADAY_PORTFOLIO", ttl=0).dropna(how='all')
-            active = df[df['Status'].astype(str).str.upper() == 'OPEN'].copy()
-            if not active.empty:
-                rows = []
-                for _, r in active.iterrows():
-                    ltp, vwap, dist_v = get_vwap_data(r['Symbol'])
-                    sys_sl = round(vwap * 0.999, 2)
-                    cap_pnl = ((ltp - float(r['Entry_Price'])) / float(r['Entry_Price'])) * 500
-                    rows.append({"Symbol": r['Symbol'], "LTP": ltp, "SYSTEM SL": sys_sl, "5X P&L%": f"{round(cap_pnl/100, 2)}%", "Signal": "✅" if ltp > sys_sl else "🚨 EXIT"})
-                st.table(pd.DataFrame(rows))
-        except: pass
-    live_intra()
-
-# --- TAB 2: STAGE 2 SWING ---
-with tab2:
-    st.subheader("Step 1: Swing Engine")
-    universe_choice = st.radio("Target Universe:", ["Nifty 500", "Microcap 250"], horizontal=True)
-    budget = 20000 if universe_choice == "Nifty 500" else 10000
-    
-    if st.button(f"🚀 Scan {universe_choice} Leaders"):
-        st.session_state.swing_results = run_engine(5.0, use_sma_wall=True, universe=universe_choice)
-    
-    if 'swing_results' in st.session_state and not st.session_state.swing_results.empty:
-        df_s = st.session_state.swing_results
-        df_s['Qty_Suggested'] = (budget / df_s['LTP']).astype(int)
-        st.write(f"### {universe_choice} Analysis")
-        cols_s = [c for c in ['Rank', 'Symbol', 'LTP', 'Dist_Wall%', 'Qty_Suggested'] if c in df_s.columns]
-        st.table(df_s[cols_s])
-        
-        with st.form("swing_commit"):
-            confirmed_s = []
-            for i, row in df_s.iterrows():
-                if row.get('Rank') == "🔥 LEADER":
-                    qty = row.get('Qty_Suggested', 0)
-                    if st.checkbox(f"Allocate ₹{budget} to {row['Symbol']} ({qty} shares)", key=f"sw_{row['Symbol']}"):
-                        confirmed_s.append({'Symbol': row['Symbol'], 'Entry_Price': row['LTP'], 'Date': get_now_ist().strftime('%Y-%m-%d'), 'Status': 'OPEN'})
-            if st.form_submit_button("💾 COMMIT SWING"):
-                df_cur_s = conn.read(worksheet="SWING_PORTFOLIO", ttl=0).dropna(how='all')
-                conn.update(worksheet="SWING_PORTFOLIO", data=pd.concat([df_cur_s, pd.DataFrame(confirmed_s)], ignore_index=True))
-                st.success("Committed!"); time.sleep(1); st.rerun()
-
-    st.write("---")
-    st.subheader("Step 2: Swing Risk Guard")
-    mkt_active = is_market_open()
-    try:
-        df_sw = conn.read(worksheet="SWING_PORTFOLIO", ttl=0).dropna(how='all')
-        active_sw = df_sw[df_sw['Status'].astype(str).str.upper() == 'OPEN'].copy()
-        if not active_sw.empty:
-            if not mkt_active:
-                st.info("🌙 Market Closed. Pings Paused.")
-                st.table(active_sw[['Symbol', 'Entry_Price', 'Date']])
-            else:
-                sw_rows = []
-                for _, r in active_sw.iterrows():
-                    hard, trail, ltp = get_swing_stops(r['Symbol'])
-                    pnl = ((ltp - float(r['Entry_Price'])) / float(r['Entry_Price'])) * 100
-                    sw_rows.append({"Symbol": r['Symbol'], "LTP": ltp, "P&L%": f"{round(pnl, 2)}%", "HARD SL": hard, "TRAIL SL": trail})
-                st.table(pd.DataFrame(sw_rows))
-        else:
-            st.info("Swing portfolio empty.")
-    except Exception as e:
-        st.error(f"Sync Error: {e}")
+            active = df[df['Status'].
