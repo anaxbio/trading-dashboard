@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 from streamlit_gsheets import GSheetsConnection
-from datetime import datetime, time as dtime
+from datetime import datetime
 import time
 import pytz
 from concurrent.futures import ThreadPoolExecutor
@@ -15,11 +15,8 @@ def get_now_ist():
     return datetime.now(pytz.timezone('Asia/Kolkata'))
 
 def is_market_open():
-    """Checks if the Indian Stock Market is currently trading."""
     now = get_now_ist()
-    # Weekends: Saturday (5), Sunday (6)
     if now.weekday() >= 5: return False
-    # Standard Hours: 09:15 to 15:30
     mkt_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
     mkt_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
     return mkt_start <= now <= mkt_end
@@ -57,15 +54,17 @@ def process_ticker(sym, threshold, use_sma_wall):
         if len(hist) < 200: return None
         curr_p = hist['Close'].iloc[-1]
         sma200 = hist['Close'].rolling(200).mean().iloc[-1]
-        dist_from_wall = ((curr_p - sma200) / sma200) * 100
         if use_sma_wall and curr_p < (sma200 * 0.98): return None
+        
         prev_c = hist['Close'].iloc[-2]
         day_h = hist['High'].iloc[-1]
         max_chg = ((day_h - prev_c) / prev_c) * 100
         avg_vol = hist['Volume'].tail(30).mean()
         rvol = hist['Volume'].iloc[-1] / (avg_vol if avg_vol > 0 else 1)
+        
         if max_chg >= threshold and rvol > 1.2:
-            return {'Symbol': sym, 'LTP': round(curr_p, 2), 'Max%': round(max_chg, 2), 'RVOL': round(rvol, 1), 'Dist_Wall%': round(dist_from_wall, 2)}
+            dist_wall = ((curr_p - sma200) / sma200) * 100
+            return {'Symbol': sym, 'LTP': round(curr_p, 2), 'Max%': round(max_chg, 2), 'RVOL': round(rvol, 1), 'Dist_Wall%': round(dist_wall, 2)}
     except: pass
     return None
 
@@ -77,6 +76,7 @@ def run_engine(threshold, use_sma_wall, universe="Nifty 500"):
     try:
         tickers = pd.read_csv(urls.get(universe, urls["Nifty 500"]))['Symbol'].tolist()
     except: return pd.DataFrame()
+    
     results = []
     prog = st.progress(0)
     with ThreadPoolExecutor(max_workers=25) as executor:
@@ -127,15 +127,8 @@ with tab1:
     @st.fragment(run_every="120s")
     def live_intra():
         if not is_market_open():
-            st.info("🌙 Indian Market is Closed. Auto-refresh paused.")
-            try:
-                df = conn.read(worksheet="INTRADAY_PORTFOLIO", ttl=0).dropna(how='all')
-                active = df[df['Status'].astype(str).str.upper() == 'OPEN'].copy()
-                if not active.empty: st.table(active[['Symbol', 'Entry_Price', 'Date']])
-            except: pass
+            st.info("🌙 Market Closed. Refresh Paused.")
             return
-
-        st.caption(f"Next Live Sync: {get_now_ist().strftime('%H:%M:%S')}")
         try:
             df = conn.read(worksheet="INTRADAY_PORTFOLIO", ttl=0).dropna(how='all')
             active = df[df['Status'].astype(str).str.upper() == 'OPEN'].copy()
@@ -145,7 +138,7 @@ with tab1:
                     ltp, vwap, dist_v = get_vwap_data(r['Symbol'])
                     sys_sl = round(vwap * 0.999, 2)
                     cap_pnl = ((ltp - float(r['Entry_Price'])) / float(r['Entry_Price'])) * 500
-                    rows.append({"Symbol": r['Symbol'], "LTP": ltp, "Dist_VWAP%": f"{dist_v}%", "SYSTEM SL": sys_sl, "5X P&L%": f"{round(cap_pnl/100, 2)}%", "Signal": "✅" if ltp > sys_sl else "🚨 EXIT"})
+                    rows.append({"Symbol": r['Symbol'], "LTP": ltp, "SYSTEM SL": sys_sl, "5X P&L%": f"{round(cap_pnl/100, 2)}%", "Signal": "✅" if ltp > sys_sl else "🚨 EXIT"})
                 st.table(pd.DataFrame(rows))
         except: pass
     live_intra()
@@ -162,7 +155,7 @@ with tab2:
     if 'swing_results' in st.session_state and not st.session_state.swing_results.empty:
         df_s = st.session_state.swing_results
         df_s['Qty_Suggested'] = (budget / df_s['LTP']).astype(int)
-        st.write(f"### {universe_choice} Analysis (₹{budget} per stock)")
+        st.write(f"### {universe_choice} Analysis")
         cols_s = [c for c in ['Rank', 'Symbol', 'LTP', 'Dist_Wall%', 'Qty_Suggested'] if c in df_s.columns]
         st.table(df_s[cols_s])
         
@@ -173,42 +166,25 @@ with tab2:
                     qty = row.get('Qty_Suggested', 0)
                     if st.checkbox(f"Allocate ₹{budget} to {row['Symbol']} ({qty} shares)", key=f"sw_{row['Symbol']}"):
                         confirmed_s.append({'Symbol': row['Symbol'], 'Entry_Price': row['LTP'], 'Date': get_now_ist().strftime('%Y-%m-%d'), 'Status': 'OPEN'})
-            if st.form_submit_button("💾 COMMIT SWING LEADERS"):
+            if st.form_submit_button("💾 COMMIT SWING"):
                 df_cur_s = conn.read(worksheet="SWING_PORTFOLIO", ttl=0).dropna(how='all')
                 conn.update(worksheet="SWING_PORTFOLIO", data=pd.concat([df_cur_s, pd.DataFrame(confirmed_s)], ignore_index=True))
-                st.success("Swing Leaders committed!")
-                time.sleep(1); st.rerun()
+                st.success("Committed!"); time.sleep(1); st.rerun()
 
-st.write("---")
+    st.write("---")
     st.subheader("Step 2: Swing Risk Guard")
-    
-    # NEW: Total Lockdown check for Swing pings
-    market_is_active = is_market_open()
-    
+    mkt_active = is_market_open()
     try:
         df_sw = conn.read(worksheet="SWING_PORTFOLIO", ttl=0).dropna(how='all')
         active_sw = df_sw[df_sw['Status'].astype(str).str.upper() == 'OPEN'].copy()
-        
         if not active_sw.empty:
-            if not market_is_active:
-                st.info("🌙 Market is Closed. Showing last recorded Entry Prices. (Pings Paused)")
+            if not mkt_active:
+                st.info("🌙 Market Closed. Pings Paused.")
                 st.table(active_sw[['Symbol', 'Entry_Price', 'Date']])
             else:
-                sw_monitor = []
+                sw_rows = []
                 for _, r in active_sw.iterrows():
-                    # This loop ONLY runs during 9:15 - 3:30 IST
                     hard, trail, ltp = get_swing_stops(r['Symbol'])
                     pnl = ((ltp - float(r['Entry_Price'])) / float(r['Entry_Price'])) * 100
-                    sw_monitor.append({
-                        "Symbol": r['Symbol'], 
-                        "Entry": r['Entry_Price'], 
-                        "LTP": ltp, 
-                        "P&L%": f"{round(pnl, 2)}%", 
-                        "HARD SL": hard, 
-                        "TRAIL SL": trail
-                    })
-                st.table(pd.DataFrame(sw_monitor))
-        else:
-            st.info("Swing portfolio empty.")
-    except Exception as e:
-        st.error(f"Error accessing Swing Portfolio: {e}")
+                    sw_rows.append({"Symbol": r['Symbol'], "LTP": ltp, "P&L%": f"{round(pnl, 2)}%", "HARD SL": hard, "TRAIL SL": trail})
+                st.table(pd.DataFrame(sw_rows))
