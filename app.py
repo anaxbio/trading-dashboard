@@ -16,6 +16,7 @@ def get_now_ist():
 
 def is_market_open():
     now = get_now_ist()
+    # 5 = Saturday, 6 = Sunday
     if now.weekday() >= 5: return False
     mkt_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
     mkt_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
@@ -188,3 +189,7 @@ with tab2:
                     pnl = ((ltp - float(r['Entry_Price'])) / float(r['Entry_Price'])) * 100
                     sw_rows.append({"Symbol": r['Symbol'], "LTP": ltp, "P&L%": f"{round(pnl, 2)}%", "HARD SL": hard, "TRAIL SL": trail})
                 st.table(pd.DataFrame(sw_rows))
+        else:
+            st.info("Swing portfolio empty.")
+    except Exception as e:
+        st.error(f"Sync Error: {e}")
