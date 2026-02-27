@@ -18,7 +18,6 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 
 # --- DATA ENGINES ---
 def get_vwap_data(sym):
-    """Fetches 1m data to calculate precise intraday VWAP."""
     try:
         t = yf.Ticker(f"{sym}.NS")
         df = t.history(period="1d", interval="1m")
@@ -29,7 +28,6 @@ def get_vwap_data(sym):
     except: return 0.0, 0.0
 
 def process_ticker(sym, threshold, use_sma_wall):
-    """Core logic for both scanners."""
     try:
         t = yf.Ticker(f"{sym}.NS")
         hist = t.history(period="1y")
@@ -39,7 +37,6 @@ def process_ticker(sym, threshold, use_sma_wall):
         sma200 = hist['Close'].rolling(200).mean().iloc[-1]
         dist_from_wall = ((curr_p - sma200) / sma200) * 100
         
-        # Strictly apply the Wall for Swing tab
         if use_sma_wall and curr_p < sma200: return None
         
         prev_c = hist['Close'].iloc[-2]
@@ -61,7 +58,6 @@ def process_ticker(sym, threshold, use_sma_wall):
     return None
 
 def run_engine(threshold, use_sma_wall):
-    """Orchestrates the Nifty 500 scan."""
     url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
     try:
         tickers = pd.read_csv(url)['Symbol'].tolist()
@@ -79,7 +75,6 @@ def run_engine(threshold, use_sma_wall):
     
     df = pd.DataFrame(results)
     if not df.empty and use_sma_wall:
-        # Ranking Logic for Swing Tab
         df = df.sort_values(by='Dist_Wall%', ascending=False).reset_index(drop=True)
         df['Rank'] = "Laggard"
         df.loc[0:4, 'Rank'] = "🔥 LEADER"
@@ -96,4 +91,83 @@ with tab1:
     if st.button("🔥 Scan Intraday Movers (>4%)"):
         st.session_state.intra_results = run_engine(4.0, use_sma_wall=False)
     
-    if 'intra_results' in st
+    if 'intra_results' in st.session_state and not st.session_state.intra_results.empty:
+        st.dataframe(st.session_state.intra_results)
+        with st.form("intra_commit"):
+            confirmed = []
+            for i, row in st.session_state.intra_results.iterrows():
+                if st.checkbox(f"Trade {row['Symbol']} (RVOL: {row['RVOL']})", key=f"intra_{row['Symbol']}"):
+                    confirmed.append({
+                        'Symbol': row['Symbol'], 'Entry_Price': row['LTP'], 
+                        'Date': get_now_ist().strftime('%Y-%m-%d %H:%M'), 'Status': 'OPEN'
+                    })
+            if st.form_submit_button("💾 COMMIT TO 5X PORTFOLIO"):
+                df_i = conn.read(worksheet="INTRADAY_PORTFOLIO", ttl=0).dropna(how='all')
+                conn.update(worksheet="INTRADAY_PORTFOLIO", data=pd.concat([df_i, pd.DataFrame(confirmed)], ignore_index=True))
+                st.success("Loaded to 5X Cockpit!")
+                time.sleep(1); st.rerun()
+
+    st.divider()
+    st.subheader("Step 2: 5X Leverage Monitor (Auto-updates 2m)")
+    @st.fragment(run_every="120s")
+    def live_intra():
+        try:
+            df = conn.read(worksheet="INTRADAY_PORTFOLIO", ttl=0).dropna(how='all')
+            active = df[df['Status'].astype(str).str.upper() == 'OPEN'].copy()
+            if not active.empty:
+                rows = []
+                for _, r in active.iterrows():
+                    ltp, vwap = get_vwap_data(r['Symbol'])
+                    sys_sl = round(vwap * 0.999, 2)
+                    cap_pnl = ((ltp - float(r['Entry_Price'])) / float(r['Entry_Price'])) * 500
+                    rows.append({
+                        "Symbol": r['Symbol'], "LTP": ltp, "Entry": r['Entry_Price'], 
+                        "SYSTEM SL": sys_sl, "5X P&L%": f"{round(cap_pnl, 2)}%", 
+                        "Signal": "✅" if ltp > sys_sl else "🚨 EXIT"
+                    })
+                st.table(pd.DataFrame(rows))
+        except: pass
+    live_intra()
+
+# --- TAB 2: STAGE 2 SWING ---
+with tab2:
+    st.subheader("Step 1: Swing Engine (₹1 Lakh Portfolio Model)")
+    if st.button("🚀 Scan for Swing Leaders (>5%)"):
+        st.session_state.swing_results = run_engine(5.0, use_sma_wall=True)
+    
+    if 'swing_results' in st.session_state and not st.session_state.swing_results.empty:
+        df_res = st.session_state.swing_results
+        df_res['Qty_for_20k'] = (20000 / df_res['LTP']).astype(int)
+        
+        st.write("### Top Picks (Sorted by Strength)")
+        cols_to_show = [c for c in ['Rank', 'Symbol', 'LTP', 'Dist_Wall%', 'Qty_for_20k'] if c in df_res.columns]
+        st.table(df_res[cols_to_show])
+        
+        with st.form("swing_commit"):
+            confirmed_s = []
+            for i, row in df_res.iterrows():
+                if 'Rank' in row and row['Rank'] == "🔥 LEADER":
+                    qty = row.get('Qty_for_20k', 0)
+                    if st.checkbox(f"Allocate ₹20k to {row['Symbol']} ({qty} shares)", key=f"sw_{row['Symbol']}"):
+                        confirmed_s.append({
+                            'Symbol': row['Symbol'], 'Entry_Price': row['LTP'], 
+                            'Date': get_now_ist().strftime('%Y-%m-%d'), 'Status': 'OPEN'
+                        })
+            
+            if st.form_submit_button("💾 COMMIT LEADERS TO SHEETS"):
+                if confirmed_s:
+                    df_s = conn.read(worksheet="SWING_PORTFOLIO", ttl=0).dropna(how='all')
+                    conn.update(worksheet="SWING_PORTFOLIO", data=pd.concat([df_s, pd.DataFrame(confirmed_s)], ignore_index=True))
+                    st.success("Swing Leaders committed!")
+                    time.sleep(1); st.rerun()
+                else:
+                    st.warning("Please select a Leader to proceed.")
+
+    st.divider()
+    st.subheader("Step 2: Swing Portfolio")
+    try:
+        df_sw = conn.read(worksheet="SWING_PORTFOLIO", ttl=0).dropna(how='all')
+        active_sw = df_sw[df_sw['Status'].astype(str).str.upper() == 'OPEN']
+        if not active_sw.empty: 
+            st.table(active_sw[['Symbol', 'Entry_Price', 'Date']])
+    except: st.info("Swing portfolio empty.")
