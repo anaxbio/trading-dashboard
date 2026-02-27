@@ -101,7 +101,7 @@ tab1, tab2 = st.tabs(["🚀 INTRADAY 5X COCKPIT", "📈 STAGE 2 SWING"])
 
 # --- TAB 1: INTRADAY 5X ---
 with tab1:
-    st.subheader("Step 1: Intraday Hunter (5X Leverage Model)")
+    st.subheader("Step 1: Intraday Hunter")
     if st.button("🔥 Scan Intraday Movers"):
         st.session_state.intra_results = run_engine(4.0, use_sma_wall=False)
     
@@ -130,4 +130,42 @@ with tab1:
             return
         try:
             df = conn.read(worksheet="INTRADAY_PORTFOLIO", ttl=0).dropna(how='all')
-            active = df[df['Status'].
+            active_filter = df['Status'].astype(str).str.upper() == 'OPEN'
+            active = df[active_filter].copy()
+            if not active.empty:
+                rows = []
+                for _, r in active.iterrows():
+                    ltp, vwap, dist_v = get_vwap_data(r['Symbol'])
+                    sys_sl = round(vwap * 0.999, 2)
+                    cap_pnl = ((ltp - float(r['Entry_Price'])) / float(r['Entry_Price'])) * 500
+                    rows.append({"Symbol": r['Symbol'], "LTP": ltp, "SYSTEM SL": sys_sl, "5X P&L%": f"{round(cap_pnl/100, 2)}%", "Signal": "✅" if ltp > sys_sl else "🚨 EXIT"})
+                st.table(pd.DataFrame(rows))
+        except: pass
+    live_intra()
+
+# --- TAB 2: STAGE 2 SWING ---
+with tab2:
+    st.subheader("Step 1: Swing Engine")
+    universe_choice = st.radio("Target Universe:", ["Nifty 500", "Microcap 250"], horizontal=True)
+    budget = 20000 if universe_choice == "Nifty 500" else 10000
+    
+    if st.button(f"🚀 Scan {universe_choice} Leaders"):
+        st.session_state.swing_results = run_engine(5.0, use_sma_wall=True, universe=universe_choice)
+    
+    if 'swing_results' in st.session_state and not st.session_state.swing_results.empty:
+        df_s = st.session_state.swing_results
+        df_s['Qty_Suggested'] = (budget / df_s['LTP']).astype(int)
+        st.write(f"### {universe_choice} Analysis")
+        cols_s = [c for c in ['Rank', 'Symbol', 'LTP', 'Dist_Wall%', 'Qty_Suggested'] if c in df_s.columns]
+        st.table(df_s[cols_s])
+        
+        with st.form("swing_commit"):
+            confirmed_s = []
+            for i, row in df_s.iterrows():
+                if row.get('Rank') == "🔥 LEADER":
+                    qty = row.get('Qty_Suggested', 0)
+                    if st.checkbox(f"Allocate ₹{budget} to {row['Symbol']} ({qty} shares)", key=f"sw_{row['Symbol']}"):
+                        confirmed_s.append({'Symbol': row['Symbol'], 'Entry_Price': row['LTP'], 'Date': get_now_ist().strftime('%Y-%m-%d'), 'Status': 'OPEN'})
+            if st.form_submit_button("💾 COMMIT SWING"):
+                df_cur_s = conn.read(worksheet="SWING_PORTFOLIO", ttl=0).dropna(how='all')
+                conn.update(worksheet="SWING_PORTFOLIO", data=pd.concat([df_cur_s, pd.DataFrame(confirmed_s)], ignore_index=True
