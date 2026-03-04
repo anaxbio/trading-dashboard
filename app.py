@@ -68,13 +68,23 @@ def process_ticker(sym, threshold, use_sma_wall):
         if max_chg >= threshold and rvol > 1.2:
             dist_wall = ((curr_p - sma200) / sma200) * 100
             
-            # Risk Defense: Fetch VWAP upfront for leaders
+            # Fetch VWAP upfront for the momentum candidates
             _, vwap, _ = get_vwap_data(sym)
             if vwap == 0.0: vwap = curr_p # Fallback
+            
+            # 🚨 THE KILL SWITCH: If LTP is below VWAP, it's a failed setup. Ignore it entirely.
+            if curr_p < vwap:
+                return None
+                
             sys_sl = round(vwap * 0.999, 2)
             
+            # Calculate distance (Since LTP > VWAP, this will always be a positive drop percentage)
             sl_drop_pct = round(((curr_p - sys_sl) / curr_p) * 100, 2)
-            risk_warn = "⚠️ DEEP SL" if sl_drop_pct > 1.5 else "✅ TIGHT SL"
+            
+            if sl_drop_pct > 1.5:
+                risk_warn = "⚠️ DEEP SL"
+            else:
+                risk_warn = "✅ TIGHT SL"
             
             return {
                 'Symbol': sym, 'LTP': round(curr_p, 2), 
@@ -134,7 +144,7 @@ tab1, tab2 = st.tabs(["🚀 INTRADAY 5X COCKPIT", "📈 STAGE 2 SWING"])
 
 # --- TAB 1: INTRADAY 5X ---
 with tab1:
-    st.subheader("Step 1: Intraday Hunter (VWAP Defense Active)")
+    st.subheader("Step 1: Intraday Hunter (Strict VWAP Filter Active)")
     if st.button("🔥 Scan Intraday Movers"):
         st.session_state.intra_results = run_engine(4.0, use_sma_wall=False)
     
@@ -142,7 +152,6 @@ with tab1:
         df_i = st.session_state.intra_results
         df_i['Max_Qty_5X'] = (100000 / df_i['LTP']).astype(int)
         
-        # Displaying the upfront Risk Warning and SL metrics
         cols = [c for c in ['Rank', 'Symbol', 'LTP', 'Max%', 'Sys_SL', 'SL_Distance%', 'Risk', 'Max_Qty_5X'] if c in df_i.columns]
         st.table(df_i[cols])
         
