@@ -1,53 +1,3 @@
-import streamlit as st
-import pandas as pd
-import yfinance as yf
-from streamlit_gsheets import GSheetsConnection
-from datetime import datetime
-import time
-import pytz
-from concurrent.futures import ThreadPoolExecutor
-
-# --- CONFIG ---
-st.set_page_config(page_title="EP Dual-Engine Cockpit", layout="wide")
-st.title("🛡️ EP Strategy: Intraday 5X vs. Stage 2 Swing")
-
-def get_now_ist():
-    return datetime.now(pytz.timezone('Asia/Kolkata'))
-
-def is_market_open():
-    now = get_now_ist()
-    if now.weekday() >= 5: return False
-    mkt_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
-    mkt_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
-    return mkt_start <= now <= mkt_end
-
-conn = st.connection("gsheets", type=GSheetsConnection)
-
-# --- DATA ENGINES ---
-def get_vwap_data(sym):
-    try:
-        t = yf.Ticker(f"{sym}.NS")
-        df = t.history(period="1d", interval="1m")
-        if df.empty or df['Volume'].sum() == 0: return 0.0, 0.0, 0.0
-        df['TP'] = (df['High'] + df['Low'] + df['Close']) / 3
-        vol_sum = df['Volume'].sum()
-        vwap = (df['TP'] * df['Volume']).sum() / vol_sum
-        ltp = df['Close'].iloc[-1]
-        dist_vwap = ((ltp - vwap) / vwap) * 100
-        return round(ltp, 2), round(vwap, 2), round(dist_vwap, 2)
-    except: return 0.0, 0.0, 0.0
-
-def get_swing_stops(sym):
-    try:
-        t = yf.Ticker(f"{sym}.NS")
-        hist = t.history(period="50d")
-        if hist.empty: return 0.0, 0.0, 0.0
-        hard_sl = hist['Low'].iloc[-1]
-        trail_sl = hist['Close'].rolling(20).mean().iloc[-1]
-        curr_ltp = hist['Close'].iloc[-1]
-        return round(hard_sl, 2), round(trail_sl, 2), round(curr_ltp, 2)
-    except: return 0.0, 0.0, 0.0
-
 def process_ticker(sym, threshold, use_sma_wall):
     try:
         t = yf.Ticker(f"{sym}.NS")
@@ -65,163 +15,22 @@ def process_ticker(sym, threshold, use_sma_wall):
         
         if max_chg >= threshold and rvol > 1.2:
             dist_wall = ((curr_p - sma200) / sma200) * 100
+            
+            # NEW: Fetch VWAP only for the leaders to keep the scan fast
+            _, vwap, _ = get_vwap_data(sym)
+            sys_sl = round(vwap * 0.999, 2)
+            
+            # NEW: Calculate how far the SL is from the current price
+            sl_drop_pct = round(((curr_p - sys_sl) / curr_p) * 100, 2)
+            
+            # NEW: Warning flag if the SL drop is dangerous for 5X leverage (e.g., > 1.5% away)
+            risk_warn = "⚠️ DEEP SL" if sl_drop_pct > 1.5 else "✅ TIGHT SL"
+            
             return {
                 'Symbol': sym, 'LTP': round(curr_p, 2), 
-                'Max%': round(max_chg, 2), 'RVOL': round(rvol, 1), 
+                'Max%': round(max_chg, 2), 'RVOL': round(rvol, 1),
+                'Sys_SL': sys_sl, 'SL_Distance%': f"-{sl_drop_pct}%", 'Risk': risk_warn,
                 'Dist_Wall%': round(dist_wall, 2)
             }
     except: pass
     return None
-
-def run_engine(threshold, use_sma_wall, universe="Nifty 500"):
-    urls = {
-        "Nifty 500": "https://archives.nseindia.com/content/indices/ind_nifty500list.csv",
-        "Microcap 250": "https://archives.nseindia.com/content/indices/ind_niftymicrocap250list.csv"
-    }
-    try:
-        url = urls.get(universe, urls["Nifty 500"])
-        tickers = pd.read_csv(url)['Symbol'].tolist()
-    except: return pd.DataFrame()
-    
-    results = []
-    prog = st.progress(0)
-    with ThreadPoolExecutor(max_workers=25) as executor:
-        futures = [executor.submit(process_ticker, s, threshold, use_sma_wall) for s in tickers]
-        for i, f in enumerate(futures):
-            prog.progress((i+1)/len(tickers))
-            res = f.result()
-            if res: results.append(res)
-    prog.empty()
-    df = pd.DataFrame(results)
-    if not df.empty:
-        sort_col = 'Dist_Wall%' if use_sma_wall else 'Max%'
-        df = df.sort_values(by=sort_col, ascending=False).reset_index(drop=True)
-        df['Rank'] = "Laggard"
-        df.loc[0:4, 'Rank'] = "🔥 LEADER"
-        df.loc[5:7, 'Rank'] = "⚠️ LAGGARD"
-        df = df.head(8)
-    return df
-
-# --- UI TABS ---
-tab1, tab2 = st.tabs(["🚀 INTRADAY 5X COCKPIT", "📈 STAGE 2 SWING"])
-
-# --- TAB 1: INTRADAY 5X ---
-with tab1:
-    st.subheader("Step 1: Intraday Hunter")
-    if st.button("🔥 Scan Intraday Movers"):
-        st.session_state.intra_results = run_engine(4.0, use_sma_wall=False)
-    
-    if 'intra_results' in st.session_state and not st.session_state.intra_results.empty:
-        df_i = st.session_state.intra_results
-        df_i['Max_Qty_5X'] = (100000 / df_i['LTP']).astype(int)
-        cols = [c for c in ['Rank', 'Symbol', 'LTP', 'Max%', 'Max_Qty_5X'] if c in df_i.columns]
-        st.table(df_i[cols])
-        
-        with st.form("intra_commit"):
-            confirmed = []
-            for i, row in df_i.iterrows():
-                if row.get('Rank') == "🔥 LEADER":
-                    msg = f"Trade {row['Symbol']} (Qty: {row.get('Max_Qty_5X', 0)})"
-                    if st.checkbox(msg, key=f"intra_{row['Symbol']}"):
-                        confirmed.append({
-                            'Symbol': row['Symbol'], 
-                            'Entry_Price': row['LTP'], 
-                            'Date': get_now_ist().strftime('%Y-%m-%d %H:%M'), 
-                            'Status': 'OPEN'
-                        })
-            if st.form_submit_button("💾 COMMIT TO 5X PORTFOLIO"):
-                df_cur = conn.read(worksheet="INTRADAY_PORTFOLIO", ttl=0).dropna(how='all')
-                new_data = pd.DataFrame(confirmed)
-                final_df = pd.concat([df_cur, new_data], ignore_index=True)
-                conn.update(worksheet="INTRADAY_PORTFOLIO", data=final_df)
-                st.success("Committed!"); time.sleep(1); st.rerun()
-
-    st.write("---")
-    @st.fragment(run_every="120s")
-    def live_intra():
-        if not is_market_open():
-            st.info("😴 Market Closed. Refresh Paused.")
-            return
-        try:
-            df = conn.read(worksheet="INTRADAY_PORTFOLIO", ttl=0).dropna(how='all')
-            active_filter = df['Status'].astype(str).str.upper() == 'OPEN'
-            active = df[active_filter].copy()
-            if not active.empty:
-                rows = []
-                for _, r in active.iterrows():
-                    ltp, vwap, dist_v = get_vwap_data(r['Symbol'])
-                    sys_sl = round(vwap * 0.999, 2)
-                    pnl_raw = (ltp - float(r['Entry_Price'])) / float(r['Entry_Price'])
-                    cap_pnl = pnl_raw * 500
-                    rows.append({
-                        "Symbol": r['Symbol'], "LTP": ltp, "SYSTEM SL": sys_sl, 
-                        "5X P&L%": f"{round(cap_pnl/100, 2)}%", 
-                        "Signal": "✅" if ltp > sys_sl else "🚨 EXIT"
-                    })
-                st.table(pd.DataFrame(rows))
-        except: pass
-    live_intra()
-
-# --- TAB 2: STAGE 2 SWING ---
-with tab2:
-    st.subheader("Step 1: Swing Engine")
-    choice = st.radio("Target Universe:", ["Nifty 500", "Microcap 250"], horizontal=True)
-    budget = 20000 if choice == "Nifty 500" else 10000
-    
-    if st.button(f"🚀 Scan {choice} Leaders"):
-        st.session_state.swing_results = run_engine(5.0, use_sma_wall=True, universe=choice)
-    
-    if 'swing_results' in st.session_state and not st.session_state.swing_results.empty:
-        df_s = st.session_state.swing_results
-        df_s['Qty_Suggested'] = (budget / df_s['LTP']).astype(int)
-        st.write(f"### {choice} Analysis")
-        cols_s = [c for c in ['Rank', 'Symbol', 'LTP', 'Dist_Wall%', 'Qty_Suggested'] if c in df_s.columns]
-        st.table(df_s[cols_s])
-        
-        with st.form("swing_commit"):
-            confirmed_s = []
-            for i, row in df_s.iterrows():
-                if row.get('Rank') == "🔥 LEADER":
-                    qty = row.get('Qty_Suggested', 0)
-                    label = f"Allocate ₹{budget} to {row['Symbol']} ({qty} shares)"
-                    if st.checkbox(label, key=f"sw_{row['Symbol']}"):
-                        confirmed_s.append({
-                            'Symbol': row['Symbol'], 
-                            'Entry_Price': row['LTP'], 
-                            'Date': get_now_ist().strftime('%Y-%m-%d'), 
-                            'Status': 'OPEN'
-                        })
-            if st.form_submit_button("💾 COMMIT SWING"):
-                df_cur_s = conn.read(worksheet="SWING_PORTFOLIO", ttl=0).dropna(how='all')
-                new_sw_data = pd.DataFrame(confirmed_s)
-                final_sw_df = pd.concat([df_cur_s, new_sw_data], ignore_index=True)
-                conn.update(worksheet="SWING_PORTFOLIO", data=final_sw_df)
-                st.success("Committed!"); time.sleep(1); st.rerun()
-
-    st.write("---")
-    st.subheader("Step 2: Swing Risk Guard")
-    mkt_active = is_market_open()
-    try:
-        df_sw = conn.read(worksheet="SWING_PORTFOLIO", ttl=0).dropna(how='all')
-        active_sw_filter = df_sw['Status'].astype(str).str.upper() == 'OPEN'
-        active_sw = df_sw[active_sw_filter].copy()
-        if not active_sw.empty:
-            if not mkt_active:
-                st.info("😴 Market Closed. Pings Paused.")
-                st.table(active_sw[['Symbol', 'Entry_Price', 'Date']])
-            else:
-                sw_rows = []
-                for _, r in active_sw.iterrows():
-                    hard, trail, ltp = get_swing_stops(r['Symbol'])
-                    diff = ltp - float(r['Entry_Price'])
-                    pnl = (diff / float(r['Entry_Price'])) * 100
-                    sw_rows.append({
-                        "Symbol": r['Symbol'], "LTP": ltp, 
-                        "P&L%": f"{round(pnl, 2)}%", 
-                        "HARD SL": hard, "TRAIL SL": trail
-                    })
-                st.table(pd.DataFrame(sw_rows))
-        else:
-            st.info("Swing portfolio empty.")
-    except Exception as e:
-        st.error(f"Sync Error: {e}")
