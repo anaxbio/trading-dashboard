@@ -37,7 +37,7 @@ def get_vwap_data(sym):
         vol_sum = df['Volume'].sum()
         vwap = (df['TP'] * df['Volume']).sum() / vol_sum
         ltp = df['Close'].iloc[-1]
-        hod = df['High'].max() # 🚨 Fetches High of the Day for the Ratchet
+        hod = df['High'].max() # 🚨 High of Day for Ratchet Trailing SL
         return round(ltp, 2), round(vwap, 2), round(hod, 2)
     except: return 0.0, 0.0, 0.0
 
@@ -70,7 +70,7 @@ def process_ticker(sym, threshold, use_sma_wall):
         rvol = hist['Volume'].iloc[-1] / (avg_vol if avg_vol > 0 else 1)
         
         if max_chg >= threshold and rvol > 1.2:
-            _, vwap, _ = get_vwap_data(sym)
+            _, vwap, _ = get_vwap_data(sym) # Safe unpack of 3 vars
             if vwap == 0.0: vwap = curr_p 
             
             # 🚨 KILL SWITCH: Ignore if broken below VWAP
@@ -126,32 +126,6 @@ def run_engine(threshold, use_sma_wall, universe="Nifty 500"):
         df = df.head(8)
     return df
 
-def calculate_etf_momentum(sym):
-    try:
-        t = yf.Ticker(f"{sym}.NS")
-        hist = t.history(period="1y")
-        if len(hist) < 250: return None
-        
-        p_curr = hist['Close'].iloc[-1]
-        
-        r_3m = (p_curr - hist['Close'].iloc[-63]) / hist['Close'].iloc[-63]
-        r_6m = (p_curr - hist['Close'].iloc[-126]) / hist['Close'].iloc[-126]
-        r_9m = (p_curr - hist['Close'].iloc[-189]) / hist['Close'].iloc[-189]
-        r_12m = (p_curr - hist['Close'].iloc[-252]) / hist['Close'].iloc[-252]
-        
-        score = (r_3m * 0.25) + (r_6m * 0.25) + (r_9m * 0.25) + (r_12m * 0.25)
-        
-        daily_rets = hist['Close'].pct_change().dropna()
-        vol_90d = daily_rets.tail(90).std() * np.sqrt(252)
-        
-        if vol_90d == 0: return None
-        
-        return {
-            'Symbol': sym, 'LTP': round(p_curr, 2), 'Momentum_Score': score,
-            'Vol_90D': vol_90d, 'Inv_Vol': 1 / vol_90d
-        }
-    except: return None
-
 # --- UI TABS ---
 tab1, tab2, tab3 = st.tabs(["🚀 INTRADAY 5X COCKPIT", "📈 STAGE 2 SWING", "🛡️ TACTICAL ETF ALIGNER"])
 
@@ -205,7 +179,6 @@ with tab1:
             
             if active.empty: return st.write("No active trades.")
 
-            # --- Live Position & Exit Logger ---
             with st.expander("📝 Manage Trades & Record Exits"):
                 with st.form("edit_intra_positions"):
                     updated_rows = []
@@ -218,8 +191,8 @@ with tab1:
                         curr_qty = int(float(r['Qty'])) if 'Qty' in r and pd.notna(r['Qty']) else 0
                         
                         new_q = c2.number_input("Qty", value=curr_qty, step=1, key=f"iq_{idx}", label_visibility="collapsed")
-                        new_p = c3.number_input("Buy Price", value=float(r['Entry_Price']), step=0.05, key=f"ip_{idx}", label_visibility="collapsed")
-                        exit_p = c4.number_input("Exit Price", value=0.00, step=0.05, key=f"ep_{idx}", label_visibility="collapsed")
+                        new_p = c3.number_input("Buy", value=float(r['Entry_Price']), step=0.05, key=f"ip_{idx}", label_visibility="collapsed")
+                        exit_p = c4.number_input("Exit", value=0.00, step=0.05, key=f"ep_{idx}", label_visibility="collapsed")
                         new_s = c5.selectbox("Action", ["HOLD", "CLOSE TRADE"], index=0, key=f"ist_{idx}", label_visibility="collapsed")
                         
                         updated_rows.append({'idx': idx, 'q': new_q, 'p': new_p, 'ep': exit_p, 's': new_s})
@@ -230,11 +203,10 @@ with tab1:
                             df.at[u['idx'], 'Entry_Price'] = u['p']
                             if u['s'] == "CLOSE TRADE":
                                 df.at[u['idx'], 'Status'] = "EXIT"
-                                df.at[u['idx'], 'Exit_Price'] = u['ep'] # Logs your realized exit price
+                                df.at[u['idx'], 'Exit_Price'] = u['ep']
                         conn.update(worksheet="INTRADAY_PORTFOLIO", data=df)
                         st.rerun()
 
-            # --- Live P&L & Ratchet SL Engine ---
             rows = []
             total_session_pnl = 0.0
 
@@ -249,9 +221,9 @@ with tab1:
                 # 🛡️ THE RATCHET LOGIC
                 base_sl = round(vwap - 2.0, 2)
                 
-                if hod >= (entry * 1.01): # If stock surges 1% from entry
-                    trail_sl = round(hod * 0.99, 2) # Trail by 1% from Peak
-                    sys_sl = max(base_sl, entry, trail_sl) # Take the highest safety net
+                if hod >= (entry * 1.01): # 1% profit trigger
+                    trail_sl = round(hod * 0.99, 2) 
+                    sys_sl = max(base_sl, entry, trail_sl)
                     sl_type = "🔒 RATCHET"
                 else:
                     sys_sl = base_sl
@@ -363,39 +335,71 @@ with tab2:
         st.error(f"Sync Error: {e}")
 
 # ==========================================
-# TAB 3: TACTICAL ETF ALIGNER
+# TAB 3: TACTICAL ETF ALIGNER (JSON POWERED)
 # ==========================================
 with tab3:
     st.subheader("🛡️ Tactical ETF Momentum & Inverse Volatility Aligner")
-    st.markdown("Automatically calculates momentum scores and allocates capital inversely to volatility, providing exact Buy/Sell execution targets.")
+    st.markdown("Automatically scans the unrestricted ETF universe, calculates momentum scores, and allocates capital inversely to 3-month volatility.")
     
+    # Unrestricted Universe
     etf_universe = [
-        'NIFTYBEES', 'BANKBEES', 'PSUBNKBEES', 'CPSEETF', 'GOLDBEES', 
-        'SILVERBEES', 'ITBEES', 'PHARMABEES', 'MON100', 'MID150BEES', 
-        'SMALLCAP', 'AUTOBEES', 'FMCGIETF', 'METALIETF'
+        'NIFTYBEES', 'BANKBEES', 'MID150BEES', 'SMALLCAP', 'CPSEETF', 'MON100', 'MOM50IETF', 'MOM30IETF',
+        'ALPHAETF', 'LOWVOLETF', 'QUALITEAM', 'NIFTYIETF', 'ICICINIFTY', 'SETFNIF50', 'HDFCNIFTY',
+        'KOTAKNIFTY', 'UTINIFTETF', 'BSLNIFTY', 'DSPN50ETF', 'EBBETF0423', 'EBBETF0430', 'GILT5YBEES',
+        'PSUBNKBEES', 'ITBEES', 'PHARMABEES', 'AUTOBEES', 'FMCGIETF', 'METALIETF', 'CONSUMBEES', 
+        'INFRAIETF', 'INFRABEES', 'KOTAKPSUBK', 'ICICIBANKN', 'ICICITECH', 'ICICIPHARM', 'HDFCBANKETF',
+        'SETFNN50', 'JUNIORBEES', 'KOTAKBKETF', 'KOTAKIT', 'TNIDETF', 'SHARIABEES', 'MAKEINDIA',
+        'HEALTHY', 'PVTBANIETF', 'MIDCAPIETF', 'NIFTYQLITY', 'HDFCGROWTH', 'HDFCLOWVOL', 'HDFCMOMENT',
+        'ICICIALPHA', 'ICICILOWV', 'ICICIMOM30', 'ICICINV20', 'KOTAKALPHA', 'KOTAKNV20', 'NV20IETF',
+        'GOLDBEES', 'GOLDCASE', 'SILVERBEES', 'SILVERIETF', 'HDFCSILVER', 'HDFCGOLD', 'SETFGOLD', 
+        'TATAGOLD', 'TATSILV', 'ICICIGOLD', 'KOTAKGOLD', 'KOTAKSILVE', 'UTIGOLDETF', 'AXISGOLD', 
+        'BSLGOLDETF', 'DSPGOETF', 'HANGSENGBEES', 'MAHKTECH', 'MASPTOP50', 'HDFCDEV25',
+        'LIQUIDBEES', 'LIQUIDCASE', 'LIQUIDIETF', 'ICICILIQ', 'KOTAKLIQ', 'DSPGSEC'
     ]
+    
+    with st.expander("🔍 View the Unrestricted ETF Universe Scanned (120+ Candidates)"):
+        st.write(", ".join(sorted(etf_universe)))
     
     col_cash, col_scan = st.columns([1, 1])
     with col_cash:
         fresh_cash = st.number_input("Fresh Cash to Deploy (₹)", value=10000, step=1000)
     with col_scan:
         st.write("") 
-        run_etf = st.button("🔄 Run Momentum & Volatility Scan")
+        if st.button("🔄 Run Momentum & 63-Day Volatility Scan"):
+            st.session_state.run_etf_scan = True # Enables the scan cache
         
     st.write("---")
     
-    st.markdown("#### 1. Portfolio Inventory")
-    st.caption("Update your current locked units and average buy prices here.")
+    # 1. JSON OFFLINE PORTFOLIO MANAGEMENT
+    st.markdown("#### 1. JSON Portfolio Inventory")
+    st.caption("Upload your `etf_portfolio.json` file. If you make changes, click Download to save for tomorrow.")
     
-    default_holdings = pd.DataFrame([
-        {"Symbol": "GOLDBEES", "Locked_Units": 3560, "Avg_Price": 26.42},
-        {"Symbol": "PSUBNKBEES", "Locked_Units": 653, "Avg_Price": 104.14},
-        {"Symbol": "METALIETF", "Locked_Units": 3585, "Avg_Price": 11.95},
-        {"Symbol": "SILVERBEES", "Locked_Units": 126, "Avg_Price": 287.10}
-    ])
-    edited_holdings = st.data_editor(default_holdings, num_rows="dynamic", use_container_width=True)
+    if "json_holdings" not in st.session_state:
+        st.session_state.json_holdings = pd.DataFrame([
+            {"Symbol": "GOLDCASE", "Locked_Units": 3560, "Avg_Price": 26.42},
+            {"Symbol": "PSUBNKBEES", "Locked_Units": 653, "Avg_Price": 104.14},
+            {"Symbol": "METALIETF", "Locked_Units": 3585, "Avg_Price": 11.95},
+            {"Symbol": "SILVERIETF", "Locked_Units": 126, "Avg_Price": 287.10}
+        ])
+
+    col_up, col_down = st.columns([1, 1])
+    with col_up:
+        uploaded_file = st.file_uploader("Upload JSON File", type=["json"], label_visibility="collapsed")
+        if uploaded_file is not None:
+            st.session_state.json_holdings = pd.read_json(uploaded_file)
+            st.success("JSON Portfolio Loaded!")
+
+    edited_holdings = st.data_editor(st.session_state.json_holdings, num_rows="dynamic", use_container_width=True)
+    st.session_state.json_holdings = edited_holdings 
     
-    # Live P&L Tracker Engine for ETFs
+    with col_down:
+        json_data = edited_holdings.to_json(orient="records", indent=4)
+        st.download_button(
+            label="💾 Download Updated `etf_portfolio.json`",
+            data=json_data, file_name="etf_portfolio.json", mime="application/json"
+        )
+    
+    # 2. Live P&L Tracker Engine
     live_portfolio = []
     total_holdings_val = 0.0
     total_unrealized_pnl = 0.0
@@ -411,7 +415,6 @@ with tab3:
 
             live_val = units * ltp
             pnl = (ltp - avg_p) * units
-
             total_holdings_val += live_val
             total_unrealized_pnl += pnl
 
@@ -434,41 +437,71 @@ with tab3:
 
     st.write("---")
     
-    if run_etf:
-        prog_etf = st.progress(0, text="Calculating ETF Momentum & Volatility...")
-        etf_results = []
+    # 3. Logic Engine & Top 6 Execution Terminal (CACHED)
+    if st.session_state.get('run_etf_scan', False):
+        if "etf_top_6" not in st.session_state:
+            prog_etf = st.progress(0, text="Calculating Momentum & 63-Day Volatility...")
+            etf_results = []
+            
+            def calc_63d_vol(sym):
+                try:
+                    t = yf.Ticker(f"{sym}.NS")
+                    hist = t.history(period="1y")
+                    if len(hist) < 60: return None
+                    
+                    p_curr = hist['Close'].iloc[-1]
+                    def safe_ret(days):
+                        return (p_curr - hist['Close'].iloc[-days]) / hist['Close'].iloc[-days] if len(hist) >= days else 0.0
+
+                    score = (safe_ret(63)*0.25) + (safe_ret(126)*0.25) + (safe_ret(189)*0.25) + (safe_ret(252)*0.25)
+                    
+                    daily_rets = hist['Close'].pct_change().dropna()
+                    vol_63d = daily_rets.tail(63).std() * np.sqrt(252)
+                    
+                    if vol_63d == 0 or np.isnan(vol_63d): return None
+                    return {'Symbol': sym, 'LTP': round(p_curr, 2), 'Momentum_Score': score, 'Vol_63D': vol_63d, 'Inv_Vol': 1 / vol_63d}
+                except: return None
+            
+            for i, sym in enumerate(etf_universe):
+                prog_etf.progress((i+1)/len(etf_universe), text=f"Analyzing {sym}...")
+                res = calc_63d_vol(sym)
+                if res: etf_results.append(res)
+                
+            prog_etf.empty()
+            
+            if etf_results:
+                df_etf = pd.DataFrame(etf_results)
+                df_etf = df_etf.sort_values(by='Momentum_Score', ascending=False).reset_index(drop=True)
+                st.session_state.etf_top_6 = df_etf.head(6).copy()
         
-        for i, sym in enumerate(etf_universe):
-            prog_etf.progress((i+1)/len(etf_universe), text=f"Analyzing {sym}...")
-            res = calculate_etf_momentum(sym)
-            if res: etf_results.append(res)
+        # Display Logic (Using Cached Results to prevent 2-minute re-runs on edit)
+        if "etf_top_6" in st.session_state:
+            top_6 = st.session_state.etf_top_6.copy()
+            core_4 = top_6.head(4).copy()
+            sum_inv_vol = core_4['Inv_Vol'].sum()
             
-        prog_etf.empty()
-        
-        if etf_results:
-            df_etf = pd.DataFrame(etf_results)
-            df_etf = df_etf.sort_values(by='Momentum_Score', ascending=False).reset_index(drop=True)
-            top_4 = df_etf.head(4).copy()
+            top_6['Target_Weight_%'] = 0.0
+            for i in range(4):
+                top_6.loc[i, 'Target_Weight_%'] = (top_6.loc[i, 'Inv_Vol'] / sum_inv_vol) * 100
+                
+            top_6['Role'] = ["Core"]*4 + ["Bench/Watchlist"]*2
             
-            sum_inv_vol = top_4['Inv_Vol'].sum()
-            top_4['Target_Weight_%'] = (top_4['Inv_Vol'] / sum_inv_vol) * 100
-            
-            st.markdown("#### 3. Momentum Leaderboard (Top 4 Picks)")
+            st.markdown("#### 3. Momentum Leaderboard (Top 4 Core + 2 Bench)")
             st.dataframe(
-                top_4[['Symbol', 'LTP', 'Momentum_Score', 'Vol_90D', 'Target_Weight_%']], 
+                top_6[['Role', 'Symbol', 'LTP', 'Momentum_Score', 'Vol_63D', 'Target_Weight_%']], 
                 column_config={
                     "Momentum_Score": st.column_config.NumberColumn(format="%.3f"),
-                    "Vol_90D": st.column_config.NumberColumn("90-Day Vol", format="%.3f"),
+                    "Vol_63D": st.column_config.NumberColumn("63-Day Vol", format="%.3f"),
                     "Target_Weight_%": st.column_config.ProgressColumn("Ideal Allocation", format="%.1f%%", min_value=0, max_value=100)
                 },
                 hide_index=True, use_container_width=True
             )
             
             st.markdown("#### 4. Execution Terminal")
-            st.caption("Calculates exactly how many units to Buy/Sell to match the Target Weights.")
+            st.caption("Calculates exactly how many units to Buy/Sell based on your JSON Live Portfolio Value.")
             
             exec_rows = []
-            for _, r in top_4.iterrows():
+            for _, r in top_6.iterrows():
                 sym = r['Symbol']
                 target_weight = r['Target_Weight_%'] / 100
                 ideal_capital = total_portfolio_val * target_weight
@@ -481,15 +514,21 @@ with tab3:
                 units_to_transact = int(capital_gap / r['LTP'])
                 
                 action = "BUY" if units_to_transact > 0 else "SELL"
-                if units_to_transact == 0: action = "HOLD"
+                if abs(units_to_transact) < 1: action = "HOLD"
                 
-                exec_rows.append({
-                    "Symbol": sym,
-                    "Target Allocation": f"₹{ideal_capital:,.2f}",
-                    "Current Value": f"₹{current_val:,.2f}",
-                    "Action": action,
-                    "Units": abs(units_to_transact),
-                    "Capital Required": f"₹{capital_gap:,.2f}"
-                })
+                if r['Role'] == "Bench/Watchlist" and current_val > 0:
+                    action = "SELL (Bench Drop)"
+                    units_to_transact = -int(current_val / r['LTP'])
+                    capital_gap = -current_val
+                
+                if action != "HOLD" or current_val > 0:
+                    exec_rows.append({
+                        "Symbol": sym,
+                        "Target Allocation": f"₹{ideal_capital:,.2f}",
+                        "Current Value": f"₹{current_val:,.2f}",
+                        "Action": action,
+                        "Units": abs(units_to_transact),
+                        "Capital Required": f"₹{capital_gap:,.2f}"
+                    })
             
             st.dataframe(pd.DataFrame(exec_rows), hide_index=True, use_container_width=True)
