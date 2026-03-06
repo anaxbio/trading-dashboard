@@ -382,7 +382,7 @@ with tab2:
 # ==========================================
 with tab3:
     st.subheader("🛡️ Tactical ETF Momentum & Inverse Volatility Aligner")
-    st.markdown("Dynamically fetches all active NSE ETFs, logically deduplicates by asset class, and allocates inversely to 63-day volatility.")
+    st.markdown("Dynamically fetches all active NSE ETFs, applies a Tax-Shield to prevent internal churning, and allocates inversely to 63-day volatility.")
     
     # Get the dynamically auto-updating universe
     etf_universe = fetch_etf_universe()
@@ -555,8 +555,20 @@ with tab3:
             
             if etf_results:
                 df_etf = pd.DataFrame(etf_results)
-                idx = df_etf.groupby('Category')['Momentum_Score'].idxmax()
-                df_dedup = df_etf.loc[idx].sort_values(by='Momentum_Score', ascending=False).reset_index(drop=True)
+                
+                # 🛡️ TAX-SHIELD LOGIC: Tag ETFs you already own
+                owned_symbols = [x['Symbol'] for x in live_portfolio if x['Units'] > 0]
+                df_etf['Owned'] = df_etf['Symbol'].isin(owned_symbols)
+                
+                # The Matrix Sort: Sorts by Category first. 
+                # If an ETF is Owned (True), it gets pushed to the very top of that category, bypassing raw momentum.
+                df_etf = df_etf.sort_values(by=['Category', 'Owned', 'Momentum_Score'], ascending=[True, False, False])
+                
+                # Deduplicate: Keeps only the #1 ETF per category. (Which is guaranteed to be your Owned ETF if it exists)
+                df_dedup = df_etf.drop_duplicates(subset=['Category'], keep='first').copy()
+                
+                # Re-sort the surviving category winners by pure Momentum to generate the Leaderboard
+                df_dedup = df_dedup.sort_values(by='Momentum_Score', ascending=False).reset_index(drop=True)
                 
                 # Top 6 Split Logic
                 top_6 = df_dedup.head(6).copy()
@@ -576,6 +588,7 @@ with tab3:
             core_4 = top_6[top_6['Role'] == 'Core'].copy()
             
             st.markdown("#### 3. Momentum Leaderboard (Deduplicated Core 4 + Bench 2)")
+            st.caption("🛡️ Tax-Shield Active: The engine will prioritize existing category holdings to prevent unnecessary churning.")
             st.dataframe(
                 top_6[['Role', 'Category', 'Symbol', 'LTP', 'Momentum_Score', 'Vol_63D', 'Target_Weight_%']], 
                 column_config={
