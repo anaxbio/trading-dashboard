@@ -37,7 +37,7 @@ def get_vwap_data(sym):
         vol_sum = df['Volume'].sum()
         vwap = (df['TP'] * df['Volume']).sum() / vol_sum
         ltp = df['Close'].iloc[-1]
-        hod = df['High'].max() # 🚨 High of Day for Ratchet Trailing SL
+        hod = df['High'].max()
         return round(ltp, 2), round(vwap, 2), round(hod, 2)
     except: return 0.0, 0.0, 0.0
 
@@ -70,10 +70,8 @@ def process_ticker(sym, threshold, use_sma_wall):
         rvol = hist['Volume'].iloc[-1] / (avg_vol if avg_vol > 0 else 1)
         
         if max_chg >= threshold and rvol > 1.2:
-            _, vwap, _ = get_vwap_data(sym) # Safe unpack of 3 vars
+            _, vwap, _ = get_vwap_data(sym)
             if vwap == 0.0: vwap = curr_p 
-            
-            # 🚨 KILL SWITCH: Ignore if broken below VWAP
             if curr_p < vwap: return None 
             
             sys_sl = round(vwap - 2.0, 2)
@@ -218,10 +216,9 @@ with tab1:
                 rupee_pnl = round((ltp - entry) * qty, 2)
                 total_session_pnl += rupee_pnl
                 
-                # 🛡️ THE RATCHET LOGIC
                 base_sl = round(vwap - 2.0, 2)
                 
-                if hod >= (entry * 1.01): # 1% profit trigger
+                if hod >= (entry * 1.01):
                     trail_sl = round(hod * 0.99, 2) 
                     sys_sl = max(base_sl, entry, trail_sl)
                     sl_type = "🔒 RATCHET"
@@ -335,30 +332,40 @@ with tab2:
         st.error(f"Sync Error: {e}")
 
 # ==========================================
-# TAB 3: TACTICAL ETF ALIGNER (JSON POWERED)
+# TAB 3: TACTICAL ETF ALIGNER (DEDUPLICATED)
 # ==========================================
 with tab3:
     st.subheader("🛡️ Tactical ETF Momentum & Inverse Volatility Aligner")
-    st.markdown("Automatically scans the unrestricted ETF universe, calculates momentum scores, and allocates capital inversely to 3-month volatility.")
+    st.markdown("Automatically scans the unrestricted ETF universe, deduplicates by asset class, and allocates capital inversely to 63-day volatility.")
     
-    # Unrestricted Universe
-    etf_universe = [
-        'NIFTYBEES', 'BANKBEES', 'MID150BEES', 'SMALLCAP', 'CPSEETF', 'MON100', 'MOM50IETF', 'MOM30IETF',
-        'ALPHAETF', 'LOWVOLETF', 'QUALITEAM', 'NIFTYIETF', 'ICICINIFTY', 'SETFNIF50', 'HDFCNIFTY',
-        'KOTAKNIFTY', 'UTINIFTETF', 'BSLNIFTY', 'DSPN50ETF', 'EBBETF0423', 'EBBETF0430', 'GILT5YBEES',
-        'PSUBNKBEES', 'ITBEES', 'PHARMABEES', 'AUTOBEES', 'FMCGIETF', 'METALIETF', 'CONSUMBEES', 
-        'INFRAIETF', 'INFRABEES', 'KOTAKPSUBK', 'ICICIBANKN', 'ICICITECH', 'ICICIPHARM', 'HDFCBANKETF',
-        'SETFNN50', 'JUNIORBEES', 'KOTAKBKETF', 'KOTAKIT', 'TNIDETF', 'SHARIABEES', 'MAKEINDIA',
-        'HEALTHY', 'PVTBANIETF', 'MIDCAPIETF', 'NIFTYQLITY', 'HDFCGROWTH', 'HDFCLOWVOL', 'HDFCMOMENT',
-        'ICICIALPHA', 'ICICILOWV', 'ICICIMOM30', 'ICICINV20', 'KOTAKALPHA', 'KOTAKNV20', 'NV20IETF',
-        'GOLDBEES', 'GOLDCASE', 'SILVERBEES', 'SILVERIETF', 'HDFCSILVER', 'HDFCGOLD', 'SETFGOLD', 
-        'TATAGOLD', 'TATSILV', 'ICICIGOLD', 'KOTAKGOLD', 'KOTAKSILVE', 'UTIGOLDETF', 'AXISGOLD', 
-        'BSLGOLDETF', 'DSPGOETF', 'HANGSENGBEES', 'MAHKTECH', 'MASPTOP50', 'HDFCDEV25',
-        'LIQUIDBEES', 'LIQUIDCASE', 'LIQUIDIETF', 'ICICILIQ', 'KOTAKLIQ', 'DSPGSEC'
-    ]
+    # --- STRUCTURED CATEGORY DICTIONARY ---
+    etf_categories = {
+        'NIFTY 50': ['NIFTYBEES', 'NIFTYIETF', 'ICICINIFTY', 'SETFNIF50', 'HDFCNIFTY', 'KOTAKNIFTY', 'UTINIFTETF', 'BSLNIFTY', 'DSPN50ETF'],
+        'NEXT 50': ['SETFNN50', 'JUNIORBEES'],
+        'MIDCAP': ['MID150BEES', 'MIDCAPIETF'],
+        'SMALLCAP': ['SMALLCAP'],
+        'BANKING': ['BANKBEES', 'KOTAKBKETF', 'PVTBANIETF', 'HDFCBANKETF', 'ICICIBANKN'],
+        'PSU BANK': ['PSUBNKBEES', 'KOTAKPSUBK'],
+        'IT / TECH': ['ITBEES', 'KOTAKIT', 'ICICITECH', 'MAHKTECH'],
+        'PHARMA': ['PHARMABEES', 'ICICIPHARM', 'HEALTHY'],
+        'AUTO': ['AUTOBEES'],
+        'FMCG / CONSUMPTION': ['FMCGIETF', 'CONSUMBEES'],
+        'METALS': ['METALIETF'],
+        'INFRA': ['INFRAIETF', 'INFRABEES'],
+        'CPSE': ['CPSEETF'],
+        'GOLD': ['GOLDBEES', 'GOLDCASE', 'HDFCGOLD', 'SETFGOLD', 'TATAGOLD', 'ICICIGOLD', 'KOTAKGOLD', 'UTIGOLDETF', 'AXISGOLD', 'BSLGOLDETF', 'DSPGOETF'],
+        'SILVER': ['SILVERBEES', 'SILVERIETF', 'HDFCSILVER', 'TATSILV', 'KOTAKSILVE'],
+        'SMART BETA': ['MOM50IETF', 'MOM30IETF', 'ALPHAETF', 'LOWVOLETF', 'QUALITEAM', 'NIFTYQLITY', 'HDFCGROWTH', 'HDFCLOWVOL', 'HDFCMOMENT', 'ICICIALPHA', 'ICICILOWV', 'ICICIMOM30', 'ICICINV20', 'KOTAKALPHA', 'KOTAKNV20', 'NV20IETF'],
+        'INTERNATIONAL': ['MON100', 'HANGSENGBEES', 'MASPTOP50', 'HDFCDEV25'],
+        'LIQUID / SAFETY': ['LIQUIDBEES', 'LIQUIDCASE', 'LIQUIDIETF', 'ICICILIQ', 'KOTAKLIQ', 'DSPGSEC', 'EBBETF0423', 'EBBETF0430', 'GILT5YBEES', 'TNIDETF', 'SHARIABEES', 'MAKEINDIA']
+    }
     
-    with st.expander("🔍 View the Unrestricted ETF Universe Scanned (120+ Candidates)"):
-        st.write(", ".join(sorted(etf_universe)))
+    # Flatten dictionary to easily look up an ETF's category
+    etf_to_cat = {sym: cat for cat, symbols in etf_categories.items() for sym in symbols}
+    etf_universe = list(etf_to_cat.keys())
+    
+    with st.expander(f"🔍 View the Unrestricted ETF Universe Scanned ({len(etf_universe)} Candidates)"):
+        st.json(etf_categories)
     
     col_cash, col_scan = st.columns([1, 1])
     with col_cash:
@@ -366,7 +373,7 @@ with tab3:
     with col_scan:
         st.write("") 
         if st.button("🔄 Run Momentum & 63-Day Volatility Scan"):
-            st.session_state.run_etf_scan = True # Enables the scan cache
+            st.session_state.run_etf_scan = True 
         
     st.write("---")
     
@@ -437,7 +444,7 @@ with tab3:
 
     st.write("---")
     
-    # 3. Logic Engine & Top 6 Execution Terminal (CACHED)
+    # 3. Logic Engine & Top 6 Execution Terminal (CACHED & DEDUPLICATED)
     if st.session_state.get('run_etf_scan', False):
         if "etf_top_6" not in st.session_state:
             prog_etf = st.progress(0, text="Calculating Momentum & 63-Day Volatility...")
@@ -459,7 +466,9 @@ with tab3:
                     vol_63d = daily_rets.tail(63).std() * np.sqrt(252)
                     
                     if vol_63d == 0 or np.isnan(vol_63d): return None
-                    return {'Symbol': sym, 'LTP': round(p_curr, 2), 'Momentum_Score': score, 'Vol_63D': vol_63d, 'Inv_Vol': 1 / vol_63d}
+                    
+                    category = etf_to_cat.get(sym, 'Other')
+                    return {'Category': category, 'Symbol': sym, 'LTP': round(p_curr, 2), 'Momentum_Score': score, 'Vol_63D': vol_63d, 'Inv_Vol': 1 / vol_63d}
                 except: return None
             
             for i, sym in enumerate(etf_universe):
@@ -471,10 +480,14 @@ with tab3:
             
             if etf_results:
                 df_etf = pd.DataFrame(etf_results)
-                df_etf = df_etf.sort_values(by='Momentum_Score', ascending=False).reset_index(drop=True)
-                st.session_state.etf_top_6 = df_etf.head(6).copy()
+                
+                # 🚨 THE BATTLE ROYALE: Keep only the highest momentum ETF per Category
+                idx = df_etf.groupby('Category')['Momentum_Score'].idxmax()
+                df_dedup = df_etf.loc[idx].sort_values(by='Momentum_Score', ascending=False).reset_index(drop=True)
+                
+                st.session_state.etf_top_6 = df_dedup.head(6).copy()
         
-        # Display Logic (Using Cached Results to prevent 2-minute re-runs on edit)
+        # Display Logic
         if "etf_top_6" in st.session_state:
             top_6 = st.session_state.etf_top_6.copy()
             core_4 = top_6.head(4).copy()
@@ -484,11 +497,11 @@ with tab3:
             for i in range(4):
                 top_6.loc[i, 'Target_Weight_%'] = (top_6.loc[i, 'Inv_Vol'] / sum_inv_vol) * 100
                 
-            top_6['Role'] = ["Core"]*4 + ["Bench/Watchlist"]*2
+            top_6['Role'] = ["Core"]*4 + ["Bench"]*2
             
-            st.markdown("#### 3. Momentum Leaderboard (Top 4 Core + 2 Bench)")
+            st.markdown("#### 3. Momentum Leaderboard (Deduplicated Core 4 + Bench 2)")
             st.dataframe(
-                top_6[['Role', 'Symbol', 'LTP', 'Momentum_Score', 'Vol_63D', 'Target_Weight_%']], 
+                top_6[['Role', 'Category', 'Symbol', 'LTP', 'Momentum_Score', 'Vol_63D', 'Target_Weight_%']], 
                 column_config={
                     "Momentum_Score": st.column_config.NumberColumn(format="%.3f"),
                     "Vol_63D": st.column_config.NumberColumn("63-Day Vol", format="%.3f"),
@@ -498,7 +511,7 @@ with tab3:
             )
             
             st.markdown("#### 4. Execution Terminal")
-            st.caption("Calculates exactly how many units to Buy/Sell based on your JSON Live Portfolio Value.")
+            st.caption("Calculates exactly how many units to Buy/Sell. The Bench gets a target allocation of 0%.")
             
             exec_rows = []
             for _, r in top_6.iterrows():
@@ -516,7 +529,7 @@ with tab3:
                 action = "BUY" if units_to_transact > 0 else "SELL"
                 if abs(units_to_transact) < 1: action = "HOLD"
                 
-                if r['Role'] == "Bench/Watchlist" and current_val > 0:
+                if r['Role'] == "Bench" and current_val > 0:
                     action = "SELL (Bench Drop)"
                     units_to_transact = -int(current_val / r['LTP'])
                     capital_gap = -current_val
@@ -524,6 +537,7 @@ with tab3:
                 if action != "HOLD" or current_val > 0:
                     exec_rows.append({
                         "Symbol": sym,
+                        "Category": r['Category'],
                         "Target Allocation": f"₹{ideal_capital:,.2f}",
                         "Current Value": f"₹{current_val:,.2f}",
                         "Action": action,
