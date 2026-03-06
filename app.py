@@ -8,6 +8,7 @@ import pytz
 from concurrent.futures import ThreadPoolExecutor
 import requests
 import io
+import numpy as np # NEW: Required for ETF Volatility Math
 
 # --- CONFIG & SETUP ---
 st.set_page_config(page_title="EP Dual-Engine Cockpit", layout="wide")
@@ -26,7 +27,7 @@ def is_market_open():
 # Connect to Google Sheets
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# --- DATA ENGINES ---
+# --- DATA ENGINES (UNCHANGED) ---
 def get_vwap_data(sym):
     try:
         t = yf.Ticker(f"{sym}.NS")
@@ -70,8 +71,6 @@ def process_ticker(sym, threshold, use_sma_wall):
         if max_chg >= threshold and rvol > 1.2:
             _, vwap, _ = get_vwap_data(sym)
             if vwap == 0.0: vwap = curr_p 
-            
-            # 🚨 KILL SWITCH: Ignore if broken below VWAP
             if curr_p < vwap: return None 
             
             sys_sl = round(vwap - 2.0, 2)
@@ -124,11 +123,41 @@ def run_engine(threshold, use_sma_wall, universe="Nifty 500"):
         df = df.head(8)
     return df
 
-# --- UI TABS ---
-tab1, tab2 = st.tabs(["🚀 INTRADAY 5X COCKPIT", "📈 STAGE 2 SWING"])
+# --- NEW: ETF MOMENTUM ENGINE ---
+def calculate_etf_momentum(sym):
+    try:
+        t = yf.Ticker(f"{sym}.NS")
+        hist = t.history(period="1y")
+        if len(hist) < 250: return None
+        
+        p_curr = hist['Close'].iloc[-1]
+        
+        # Returns
+        r_3m = (p_curr - hist['Close'].iloc[-63]) / hist['Close'].iloc[-63]
+        r_6m = (p_curr - hist['Close'].iloc[-126]) / hist['Close'].iloc[-126]
+        r_9m = (p_curr - hist['Close'].iloc[-189]) / hist['Close'].iloc[-189]
+        r_12m = (p_curr - hist['Close'].iloc[-252]) / hist['Close'].iloc[-252]
+        
+        # Strategy Score
+        score = (r_3m * 0.25) + (r_6m * 0.25) + (r_9m * 0.25) + (r_12m * 0.25)
+        
+        # Volatility (90-day annualized std dev)
+        daily_rets = hist['Close'].pct_change().dropna()
+        vol_90d = daily_rets.tail(90).std() * np.sqrt(252)
+        
+        if vol_90d == 0: return None
+        
+        return {
+            'Symbol': sym, 'LTP': round(p_curr, 2), 'Momentum_Score': score,
+            'Vol_90D': vol_90d, 'Inv_Vol': 1 / vol_90d
+        }
+    except: return None
+
+# --- UI TABS (NOW 3 TABS) ---
+tab1, tab2, tab3 = st.tabs(["🚀 INTRADAY 5X COCKPIT", "📈 STAGE 2 SWING", "🛡️ TACTICAL ETF ALIGNER"])
 
 # ==========================================
-# TAB 1: INTRADAY 5X (Velocity)
+# TAB 1: INTRADAY 5X (Velocity) -> UNCHANGED
 # ==========================================
 with tab1:
     st.subheader("Step 1: Intraday Hunter (SL = VWAP - ₹2.00)")
@@ -177,7 +206,6 @@ with tab1:
             
             if active.empty: return st.write("No active trades.")
 
-            # --- Live Position Editor ---
             with st.expander("📝 Edit Prices, Qty & Status"):
                 with st.form("edit_intra_positions"):
                     updated_rows = []
@@ -202,7 +230,6 @@ with tab1:
                         conn.update(worksheet="INTRADAY_PORTFOLIO", data=df)
                         st.rerun()
 
-            # --- Live P&L Math ---
             rows = []
             total_session_pnl = 0.0
 
@@ -215,7 +242,6 @@ with tab1:
                 rupee_pnl = round((ltp - entry) * qty, 2)
                 total_session_pnl += rupee_pnl
                 
-                # Visual Green/Red String Formatting
                 pnl_display = f"🟢 ₹{rupee_pnl:,.2f}" if rupee_pnl >= 0 else f"🔴 -₹{abs(rupee_pnl):,.2f}"
                 
                 rows.append({
@@ -225,7 +251,6 @@ with tab1:
                     "Signal": "✅ HOLD" if ltp > sys_sl else "🚨 EXIT NOW"
                 })
             
-            # --- Metrics & Display ---
             st.metric("Total Session P&L", f"₹{round(total_session_pnl, 2):,}", delta=f"{round(total_session_pnl, 2)}")
             st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
             
@@ -238,7 +263,7 @@ with tab1:
     live_intra()
 
 # ==========================================
-# TAB 2: STAGE 2 SWING (Continuity)
+# TAB 2: STAGE 2 SWING (Continuity) -> UNCHANGED
 # ==========================================
 with tab2:
     st.subheader("Step 1: Swing Engine")
@@ -278,8 +303,6 @@ with tab2:
         active_sw = df_sw[df_sw['Status'].astype(str).str.upper() == 'OPEN'].copy()
         
         if not active_sw.empty:
-            
-            # --- Live Swing Editor ---
             with st.expander("📝 Edit Swing Prices, Qty & Status"):
                 with st.form("edit_swing_positions"):
                     sw_upd = []
@@ -304,7 +327,6 @@ with tab2:
                         conn.update(worksheet="SWING_PORTFOLIO", data=df_sw)
                         st.rerun()
 
-            # --- Swing P&L Math ---
             sw_rows = []
             for idx, r in active_sw.iterrows():
                 hard, trail, ltp = get_swing_stops(r['Symbol'])
@@ -324,3 +346,113 @@ with tab2:
             st.info("Swing portfolio empty.")
     except Exception as e:
         st.error(f"Sync Error: {e}")
+
+# ==========================================
+# TAB 3: NEW TACTICAL ETF ALIGNER
+# ==========================================
+with tab3:
+    st.subheader("🛡️ Tactical ETF Momentum & Inverse Volatility Aligner")
+    st.markdown("Automatically calculates momentum scores and allocates capital inversely to volatility, providing exact Buy/Sell execution targets.")
+    
+    # Define a robust NSE ETF Universe
+    etf_universe = [
+        'NIFTYBEES', 'BANKBEES', 'PSUBNKBEES', 'CPSEETF', 'GOLDBEES', 
+        'SILVERBEES', 'ITBEES', 'PHARMABEES', 'MON100', 'MID150BEES', 
+        'SMALLCAP', 'AUTOBEES', 'FMCGIETF', 'METALIETF'
+    ]
+    
+    col_cash, col_scan = st.columns([1, 1])
+    with col_cash:
+        fresh_cash = st.number_input("Fresh Cash to Deploy (₹)", value=10000, step=1000)
+    with col_scan:
+        st.write("") # Spacing
+        run_etf = st.button("🔄 Run Momentum & Volatility Scan")
+        
+    st.write("---")
+    
+    # 1. User Holdings Data Editor
+    st.markdown("#### 1. Current Holdings")
+    st.caption("Edit your actual locked units and current prices here. The app will calculate your live portfolio weights.")
+    
+    # Pre-populate with your examples, but make it fully editable
+    default_holdings = pd.DataFrame([
+        {"Symbol": "GOLDBEES", "Locked_Units": 3560, "Avg_Price": 26.42},
+        {"Symbol": "PSUBNKBEES", "Locked_Units": 653, "Avg_Price": 104.14},
+        {"Symbol": "METALIETF", "Locked_Units": 3585, "Avg_Price": 11.95},
+        {"Symbol": "SILVERBEES", "Locked_Units": 126, "Avg_Price": 287.10}
+    ])
+    
+    edited_holdings = st.data_editor(default_holdings, num_rows="dynamic", use_container_width=True)
+    
+    # Calculate Live Values
+    edited_holdings['Live_Value'] = edited_holdings['Locked_Units'] * edited_holdings['Avg_Price']
+    total_holdings_val = edited_holdings['Live_Value'].sum()
+    total_portfolio_val = total_holdings_val + fresh_cash
+    
+    st.metric("Total Buying Power (Holdings + Cash)", f"₹{total_portfolio_val:,.2f}")
+    
+    # 2. Logic Engine & Results
+    if run_etf:
+        prog_etf = st.progress(0, text="Calculating ETF Momentum & Volatility...")
+        etf_results = []
+        
+        for i, sym in enumerate(etf_universe):
+            prog_etf.progress((i+1)/len(etf_universe), text=f"Analyzing {sym}...")
+            res = calculate_etf_momentum(sym)
+            if res: etf_results.append(res)
+            
+        prog_etf.empty()
+        
+        if etf_results:
+            df_etf = pd.DataFrame(etf_results)
+            df_etf = df_etf.sort_values(by='Momentum_Score', ascending=False).reset_index(drop=True)
+            
+            # Take Top 4 for Tactical Allocation
+            top_4 = df_etf.head(4).copy()
+            
+            # Calculate Target Weights using Inverse Volatility
+            sum_inv_vol = top_4['Inv_Vol'].sum()
+            top_4['Target_Weight_%'] = (top_4['Inv_Vol'] / sum_inv_vol) * 100
+            
+            st.markdown("#### 2. Momentum Leaderboard (Top 4 Picks)")
+            st.dataframe(
+                top_4[['Symbol', 'LTP', 'Momentum_Score', 'Vol_90D', 'Target_Weight_%']], 
+                column_config={
+                    "Momentum_Score": st.column_config.NumberColumn(format="%.3f"),
+                    "Vol_90D": st.column_config.NumberColumn("90-Day Vol", format="%.3f"),
+                    "Target_Weight_%": st.column_config.ProgressColumn("Ideal Allocation", format="%.1f%%", min_value=0, max_value=100)
+                },
+                hide_index=True, use_container_width=True
+            )
+            
+            st.markdown("#### 3. Execution Terminal")
+            st.caption("Calculates exactly how many units to Buy/Sell to match the Target Weights.")
+            
+            exec_rows = []
+            for _, r in top_4.iterrows():
+                sym = r['Symbol']
+                target_weight = r['Target_Weight_%'] / 100
+                ideal_capital = total_portfolio_val * target_weight
+                
+                # Find current value if it exists in holdings
+                current_val = 0
+                if sym in edited_holdings['Symbol'].values:
+                    current_val = edited_holdings.loc[edited_holdings['Symbol'] == sym, 'Live_Value'].values[0]
+                
+                # Calculate Gap and Units
+                capital_gap = ideal_capital - current_val
+                units_to_transact = int(capital_gap / r['LTP'])
+                
+                action = "BUY" if units_to_transact > 0 else "SELL"
+                if units_to_transact == 0: action = "HOLD"
+                
+                exec_rows.append({
+                    "Symbol": sym,
+                    "Target Allocation": f"₹{ideal_capital:,.2f}",
+                    "Current Value": f"₹{current_val:,.2f}",
+                    "Action": action,
+                    "Units": abs(units_to_transact),
+                    "Capital Required": f"₹{capital_gap:,.2f}"
+                })
+            
+            st.dataframe(pd.DataFrame(exec_rows), hide_index=True, use_container_width=True)
