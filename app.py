@@ -127,21 +127,42 @@ def run_engine(threshold, use_sma_wall, universe="Nifty 500"):
 # --- DYNAMIC ETF DISCOVERY ENGINE ---
 @st.cache_data(ttl=86400) # Caches the universe for 24 hours
 def fetch_etf_universe():
-    # Base fallback list to guarantee survival if NSE network fails
+    # 🚨 Massive 150+ Fallback Array prevents NSE Network Blocks from shrinking your scan
     base_tickers = [
-        "SILVERBEES", "GOLDBEES", "GOLDCASE", "PSUBNKBEES", "METALIETF", "CPSEETF", "MON100", 
-        "AUTOBEES", "BANKBEES", "PHARMABEES", "ITBEES", "MID150BEES", "SMALLCAP", "MOM30IETF", 
-        "ALPHAETF", "LOWVOLETF", "NIFTYBEES", "LIQUIDCASE"
+        "SILVERADD", "SILVERIETF", "TATSILV", "AXISILVER", "HDFCSILVER", "SILVERBEES", "SILVER1", "SILVER", "SBISILVER", "ESILVER", 
+        "AXISGOLD", "UNIONGOLD", "QGOLDHALF", "LICMFGOLD", "GOLDIETF", "GOLDCASE", "GOLD1", "BSLGOLDETF", "HDFCGOLD", "GOLDBEES", 
+        "BBNPPGOLD", "SETFGOLD", "IVZINGOLD", "EGOLD", "TATAGOLD", "GOLDETF", "BANKPSU", "PSUBANKADD", "PSUBANK", "HDFCPSUBK", 
+        "PSUBNKIETF", "PSUBNKBEES", "METAL", "METALIETF", "VAL30IETF", "MOVALUE", "GROWWGOLD", "ICICIB22", "CPSEETF", "HNGSNGBEES", 
+        "COMMOIETF", "MONQ50", "MODEFENCE", "AUTOIETF", "AUTOBEES", "MASPTOP50", "ABSLPSE", "MON100", "MAKEINDIA", "MNC", 
+        "EBANKNIFTY", "BBNPNBETF", "ABSLBANETF", "SETFNIFBK", "BANKIETF", "ECAPINSURE", "BANKNIFTY1", "BANKBETF", "BANKETF", 
+        "BANKBEES", "HDFCNIFBAN", "NEXT30ADD", "AXISBNKETF", "OILIETF", "FINIETF", "BFSI", "PHARMABEES", "EQUAL50ADD", "SBINEQWETF", 
+        "HEALTHIETF", "ABSLNN50ET", "AXISHCETF", "HEALTHADD", "DIVOPPBEES", "HDFCPVTBAN", "INFRAIETF", "NEXT50", "HEALTHY", 
+        "SBIETFPB", "PVTBANKADD", "HDFCNEXT50", "SETFNN50", "JUNIORBEES", "INFRABEES", "NPBET", "NEXT50IETF", "PVTBANIETF", 
+        "MIDCAPIETF", "MIDCAP", "MID150CASE", "HDFCMID150", "HDFCBSE500", "MIDCAPETF", "MID150BEES", "MAFANG", "ALPHAETF", 
+        "MOM100", "ALPL30IETF", "GSEC5IETF", "EVINDIA", "GROWWEV", "MOHEALTH", "SDL26BEES", "MOMENTUM", "MOM30IETF", "HDFCMOMENT", 
+        "HDFCLOWVOL", "AXISBPSETF", "EBBETF0430", "GILT5YBEES", "NIF100IETF", "HDFCNIF100", "MOMOMENTUM", "GSEC10YEAR", "LOWVOL", 
+        "BBETF0432", "LOWVOLIETF", "NIF100BEES", "EBBETF0431", "LICNMID100", "LIQUID1", "LIQUIDPLUS", "TOP100CASE", "LIQUIDCASE", 
+        "LIQUIDADD", "ABGSEC", "MSCIINDIA", "LIQUIDBETF", "LICNETFGSC", "IVZINNIFTY", "BSLNIFTY", "LICNETFN50", "BSE500IETF", 
+        "LIQUIDSHRI", "GROWWLIQID", "NETF", "HDFCLIQUID", "NIFTYBETF", "EBBETF0433", "NIFTY1", "LTGILTBEES", "MOLOWVOL", 
+        "NIFTYBEES", "NIFTYETF", "QNIFTY", "AXISNIFTY", "NIFTYIETF", "SETFNIF50", "MOGSEC", "HDFCNIFTY", "MOM50", "IDFNIFTYET", 
+        "ALPHA", "LOWVOL1", "GROWWDEFNC", "MULTICAP", "MONIFTY500", "HDFCVALUE", "MIDSELIETF", "GSEC10IETF", "NV20BEES", 
+        "NV20IETF", "SETF10GILT", "NV20", "GSEC10ABSL", "MOMENTUM50", "LICNFNHGP", "ESG", "AXSENSEX", "BSLSENETFG", "SENSEXIETF", 
+        "SENSEXETF", "HDFCSENSEX", "SENSEXADD", "LICNETFSEN", "HDFCQUAL", "EMULTIMQ", "MOCAPITAL", "MIDQ50ADD", "NIFTYQLITY", 
+        "NIFTY100EW", "QUAL30IETF", "LIQUIDETF", "LIQUID", "LIQUIDIETF", "LIQUIDSBI", "LIQUIDBEES", "ABSLLIQUID", "SBIETFQLTY", 
+        "MIDSMALL", "HDFCGROWTH", "GROWWN200", "CONSUMIETF", "CONSUMBEES", "SBIETFCON", "CONS", "AXISCETF", "AONETOTAL", 
+        "TOP10ADD", "MOSMALL250", "HDFCSML250", "MAHKTECH", "CONSUMER", "SMALLCAP", "SHARIABEES", "FMCGIETF", "GROWWRAIL", 
+        "TNIDETF", "MOREALTY", "TECH", "ITIETF", "AXISTECETF", "ITETF", "ITBEES", "SBIETFIT", "HDFCNIFIT", "IT", "MOQUALITY", 
+        "SILVERETF", "GOLDSHARE", "GOLDETFADD", "UTIBANKETF", "BANKETFADD", "UTINIFTETF", "NIFTY50ADD", "UTISENSETF", 
+        "NIFMID150", "UTISXN50", "NIF5GETF", "NIF10GETF", "UTINEXT50", "NIFITETF", "ITETFADD", "SILVRETF", "EBBETF0425"
     ]
     
     try:
-        # Dynamically scans the official NSE Master Equity list for any new ETFs
+        # Dynamically scans the official NSE Master Equity list for brand new ETFs
         url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
         headers = {'User-Agent': 'Mozilla/5.0'}
         r = requests.get(url, headers=headers, timeout=5)
         if r.status_code == 200:
             df_nse = pd.read_csv(io.StringIO(r.text))
-            # Finds any stock where the company name explicitly says ETF, BEES, or FUND
             is_etf = df_nse['NAME OF COMPANY'].str.contains('ETF|BEES|FUND', case=False, na=False)
             new_etfs = df_nse[is_etf]['SYMBOL'].tolist()
             base_tickers.extend(new_etfs)
@@ -537,19 +558,23 @@ with tab3:
                 df_etf = pd.DataFrame(etf_results)
                 idx = df_etf.groupby('Category')['Momentum_Score'].idxmax()
                 df_dedup = df_etf.loc[idx].sort_values(by='Momentum_Score', ascending=False).reset_index(drop=True)
-                st.session_state.etf_top_6 = df_dedup.head(6).copy()
+                
+                # 🚨 FIX: Calculate Target_Weight_% right here before saving to session_state
+                top_6 = df_dedup.head(6).copy()
+                core_4 = top_6.head(4).copy()
+                sum_inv_vol = core_4['Inv_Vol'].sum()
+                
+                top_6['Target_Weight_%'] = 0.0
+                for i in range(len(core_4)):
+                    top_6.loc[i, 'Target_Weight_%'] = (top_6.loc[i, 'Inv_Vol'] / sum_inv_vol) * 100
+                
+                top_6['Role'] = ["Core"]*len(core_4) + ["Bench"]*(len(top_6) - len(core_4))
+                
+                st.session_state.etf_top_6 = top_6
         
         if "etf_top_6" in st.session_state:
             top_6 = st.session_state.etf_top_6.copy()
-            core_4 = top_6.head(4).copy()
-            sum_inv_vol = core_4['Inv_Vol'].sum()
-            
-            # Apply Target Weights ONLY to the Core 4
-            top_6['Target_Weight_%'] = 0.0
-            for i in range(len(core_4)):
-                top_6.loc[i, 'Target_Weight_%'] = (top_6.loc[i, 'Inv_Vol'] / sum_inv_vol) * 100
-                
-            top_6['Role'] = ["Core"]*len(core_4) + ["Bench"]*(len(top_6) - len(core_4))
+            core_4 = top_6[top_6['Role'] == 'Core'].copy() # Dynamically slice the core
             
             st.markdown("#### 3. Momentum Leaderboard (Deduplicated Core 4 + Bench 2)")
             st.dataframe(
@@ -579,11 +604,13 @@ with tab3:
                     current_val = owned_item['Live Value (₹)']
                     ltp = owned_item['LTP']
                 else:
-                    ltp = float(core_4.loc[core_4['Symbol'] == sym, 'LTP'].values[0])
+                    # 🚨 FIX: Look up LTP inside top_6 instead of core_4
+                    ltp = float(top_6.loc[top_6['Symbol'] == sym, 'LTP'].values[0])
                     
                 ideal_capital = 0.0
                 if sym in core_symbols:
-                    target_weight = float(core_4.loc[core_4['Symbol'] == sym, 'Target_Weight_%'].values[0]) / 100
+                    # 🚨 FIX: Look up the Target_Weight inside top_6 where it actually exists
+                    target_weight = float(top_6.loc[top_6['Symbol'] == sym, 'Target_Weight_%'].values[0]) / 100
                     ideal_capital = total_portfolio_val * target_weight
                 
                 capital_gap = ideal_capital - current_val
