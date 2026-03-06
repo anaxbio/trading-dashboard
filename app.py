@@ -37,7 +37,8 @@ def get_vwap_data(sym):
         vol_sum = df['Volume'].sum()
         vwap = (df['TP'] * df['Volume']).sum() / vol_sum
         ltp = df['Close'].iloc[-1]
-        return round(ltp, 2), round(vwap, 2), 0.0
+        hod = df['High'].max() # 🚨 Fetches High of the Day for the Ratchet
+        return round(ltp, 2), round(vwap, 2), round(hod, 2)
     except: return 0.0, 0.0, 0.0
 
 def get_swing_stops(sym):
@@ -158,7 +159,7 @@ tab1, tab2, tab3 = st.tabs(["🚀 INTRADAY 5X COCKPIT", "📈 STAGE 2 SWING", "�
 # TAB 1: INTRADAY 5X (Velocity)
 # ==========================================
 with tab1:
-    st.subheader("Step 1: Intraday Hunter (SL = VWAP - ₹2.00)")
+    st.subheader("Step 1: Intraday Hunter")
     
     col_cap, col_info = st.columns([2, 1])
     with col_cap:
@@ -193,7 +194,7 @@ with tab1:
             st.warning("🚨 0 stocks passed the VWAP Risk Filter. The market is chopping morning breakouts.")
 
     st.write("---")
-    st.subheader("🛰️ Active War Room (Live P&L)")
+    st.subheader("🛰️ Active War Room (Ratchet SL Active)")
     
     @st.fragment(run_every="120s")
     def live_intra():
@@ -204,47 +205,63 @@ with tab1:
             
             if active.empty: return st.write("No active trades.")
 
-            with st.expander("📝 Edit Prices, Qty & Status"):
+            # --- Live Position & Exit Logger ---
+            with st.expander("📝 Manage Trades & Record Exits"):
                 with st.form("edit_intra_positions"):
                     updated_rows = []
-                    c1, c2, c3, c4 = st.columns([1.5, 1, 1.5, 1])
-                    c1.caption("Symbol"); c2.caption("Qty"); c3.caption("Buy Price"); c4.caption("Status")
+                    c1, c2, c3, c4, c5 = st.columns([1.5, 1, 1.2, 1.2, 1.5])
+                    c1.caption("Symbol"); c2.caption("Qty"); c3.caption("Buy Price"); c4.caption("Exit Price"); c5.caption("Action")
                     
                     for idx, r in active.iterrows():
-                        c1, c2, c3, c4 = st.columns([1.5, 1, 1.5, 1])
+                        c1, c2, c3, c4, c5 = st.columns([1.5, 1, 1.2, 1.2, 1.5])
                         c1.markdown(f"**{r['Symbol']}**")
                         curr_qty = int(float(r['Qty'])) if 'Qty' in r and pd.notna(r['Qty']) else 0
                         
                         new_q = c2.number_input("Qty", value=curr_qty, step=1, key=f"iq_{idx}", label_visibility="collapsed")
-                        new_p = c3.number_input("Price", value=float(r['Entry_Price']), step=0.05, key=f"ip_{idx}", label_visibility="collapsed")
-                        new_s = c4.selectbox("Status", ["OPEN", "EXIT"], index=0, key=f"ist_{idx}", label_visibility="collapsed")
-                        updated_rows.append({'idx': idx, 'q': new_q, 'p': new_p, 's': new_s})
+                        new_p = c3.number_input("Buy Price", value=float(r['Entry_Price']), step=0.05, key=f"ip_{idx}", label_visibility="collapsed")
+                        exit_p = c4.number_input("Exit Price", value=0.00, step=0.05, key=f"ep_{idx}", label_visibility="collapsed")
+                        new_s = c5.selectbox("Action", ["HOLD", "CLOSE TRADE"], index=0, key=f"ist_{idx}", label_visibility="collapsed")
+                        
+                        updated_rows.append({'idx': idx, 'q': new_q, 'p': new_p, 'ep': exit_p, 's': new_s})
                     
-                    if st.form_submit_button("✅ Update Ledger"):
+                    if st.form_submit_button("✅ Update / Close Trades"):
                         for u in updated_rows:
                             df.at[u['idx'], 'Qty'] = u['q']
                             df.at[u['idx'], 'Entry_Price'] = u['p']
-                            df.at[u['idx'], 'Status'] = u['s']
+                            if u['s'] == "CLOSE TRADE":
+                                df.at[u['idx'], 'Status'] = "EXIT"
+                                df.at[u['idx'], 'Exit_Price'] = u['ep'] # Logs your realized exit price
                         conn.update(worksheet="INTRADAY_PORTFOLIO", data=df)
                         st.rerun()
 
+            # --- Live P&L & Ratchet SL Engine ---
             rows = []
             total_session_pnl = 0.0
 
             for _, r in active.iterrows():
-                ltp, vwap, _ = get_vwap_data(r['Symbol'])
-                sys_sl = round(vwap - 2.0, 2)
+                ltp, vwap, hod = get_vwap_data(r['Symbol'])
                 
                 entry = float(r['Entry_Price'])
                 qty = int(float(r['Qty'])) if 'Qty' in r and pd.notna(r['Qty']) else 0
                 rupee_pnl = round((ltp - entry) * qty, 2)
                 total_session_pnl += rupee_pnl
                 
+                # 🛡️ THE RATCHET LOGIC
+                base_sl = round(vwap - 2.0, 2)
+                
+                if hod >= (entry * 1.01): # If stock surges 1% from entry
+                    trail_sl = round(hod * 0.99, 2) # Trail by 1% from Peak
+                    sys_sl = max(base_sl, entry, trail_sl) # Take the highest safety net
+                    sl_type = "🔒 RATCHET"
+                else:
+                    sys_sl = base_sl
+                    sl_type = "🛡️ VWAP-2"
+                
                 pnl_display = f"🟢 ₹{rupee_pnl:,.2f}" if rupee_pnl >= 0 else f"🔴 -₹{abs(rupee_pnl):,.2f}"
                 
                 rows.append({
                     "Symbol": r['Symbol'], "Qty": qty, "Entry": entry, 
-                    "LTP": ltp, "SL (V-2)": sys_sl, 
+                    "LTP": ltp, f"Active SL ({sl_type})": sys_sl, 
                     "Live P&L": pnl_display, 
                     "Signal": "✅ HOLD" if ltp > sys_sl else "🚨 EXIT NOW"
                 })
@@ -253,7 +270,7 @@ with tab1:
             st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
             
             for r in rows:
-                if "EXIT NOW" in r['Signal']: st.error(f"🚨 {r['Symbol']} has broken the VWAP-2 SL!")
+                if "EXIT NOW" in r['Signal']: st.error(f"🚨 {r['Symbol']} has broken its Trailing SL!")
                     
         except Exception as e:
             st.error(f"War Room Sync Error: {e}")
