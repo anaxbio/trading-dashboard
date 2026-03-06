@@ -525,15 +525,14 @@ with tab3:
                     hist = t.history(period="1y")
                     if len(hist) < 60: return None
                     
-                    # 🚨 Liquidity Filter: Prevents illiquid penny-ETFs from hijacking the scan
-                    avg_vol = hist['Volume'].tail(20).mean()
-                    if avg_vol < 5000: return None 
-                    
                     p_curr = hist['Close'].iloc[-1]
                     def safe_ret(days):
                         return (p_curr - hist['Close'].iloc[-days]) / hist['Close'].iloc[-days] if len(hist) >= days else 0.0
 
                     score = (safe_ret(63)*0.25) + (safe_ret(126)*0.25) + (safe_ret(189)*0.25) + (safe_ret(252)*0.25)
+                    
+                    # 🚨 REALITY CAP: Blocks broken, unadjusted split data from hijacking the #1 spot
+                    if score > 1.0 or score < -0.9: return None 
                     
                     daily_rets = hist['Close'].pct_change().dropna()
                     vol_63d = daily_rets.tail(63).std() * np.sqrt(252)
@@ -544,7 +543,7 @@ with tab3:
                     return {'Category': cat, 'Symbol': sym, 'LTP': round(p_curr, 2), 'Momentum_Score': score, 'Vol_63D': vol_63d, 'Inv_Vol': 1 / vol_63d}
                 except: return None
             
-            # Use ThreadPoolExecutor for hyper-fast scanning of all 150+ ETFs
+            # Use ThreadPoolExecutor for hyper-fast scanning of all ETFs
             with ThreadPoolExecutor(max_workers=25) as executor:
                 futures = [executor.submit(calc_63d_vol, s) for s in etf_universe]
                 for i, f in enumerate(futures):
@@ -559,7 +558,7 @@ with tab3:
                 idx = df_etf.groupby('Category')['Momentum_Score'].idxmax()
                 df_dedup = df_etf.loc[idx].sort_values(by='Momentum_Score', ascending=False).reset_index(drop=True)
                 
-                # 🚨 FIX: Calculate Target_Weight_% right here before saving to session_state
+                # Top 6 Split Logic
                 top_6 = df_dedup.head(6).copy()
                 core_4 = top_6.head(4).copy()
                 sum_inv_vol = core_4['Inv_Vol'].sum()
@@ -574,7 +573,7 @@ with tab3:
         
         if "etf_top_6" in st.session_state:
             top_6 = st.session_state.etf_top_6.copy()
-            core_4 = top_6[top_6['Role'] == 'Core'].copy() # Dynamically slice the core
+            core_4 = top_6[top_6['Role'] == 'Core'].copy()
             
             st.markdown("#### 3. Momentum Leaderboard (Deduplicated Core 4 + Bench 2)")
             st.dataframe(
@@ -604,12 +603,10 @@ with tab3:
                     current_val = owned_item['Live Value (₹)']
                     ltp = owned_item['LTP']
                 else:
-                    # 🚨 FIX: Look up LTP inside top_6 instead of core_4
                     ltp = float(top_6.loc[top_6['Symbol'] == sym, 'LTP'].values[0])
                     
                 ideal_capital = 0.0
                 if sym in core_symbols:
-                    # 🚨 FIX: Look up the Target_Weight inside top_6 where it actually exists
                     target_weight = float(top_6.loc[top_6['Symbol'] == sym, 'Target_Weight_%'].values[0]) / 100
                     ideal_capital = total_portfolio_val * target_weight
                 
