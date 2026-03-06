@@ -59,7 +59,6 @@ def process_ticker(sym, threshold, use_sma_wall):
         curr_p = hist['Close'].iloc[-1]
         sma200 = hist['Close'].rolling(200).mean().iloc[-1]
         
-        # Stage 2 Check (Only for Swing)
         if use_sma_wall and curr_p < (sma200 * 0.98): return None
         
         prev_c = hist['Close'].iloc[-2]
@@ -68,12 +67,11 @@ def process_ticker(sym, threshold, use_sma_wall):
         avg_vol = hist['Volume'].tail(30).mean()
         rvol = hist['Volume'].iloc[-1] / (avg_vol if avg_vol > 0 else 1)
         
-        # EP Breakout Check
         if max_chg >= threshold and rvol > 1.2:
             _, vwap, _ = get_vwap_data(sym)
             if vwap == 0.0: vwap = curr_p 
             
-            # 🚨 STRICT FILTER: Ignore if broken below VWAP
+            # 🚨 KILL SWITCH: Ignore if broken below VWAP
             if curr_p < vwap: return None 
             
             sys_sl = round(vwap - 2.0, 2)
@@ -104,7 +102,7 @@ def run_engine(threshold, use_sma_wall, universe="Nifty 500"):
         except: continue
     
     if not tickers: 
-        st.error(f"Failed to fetch {universe} list. NSE might be blocking the request.")
+        st.error(f"Failed to fetch {universe}. NSE might be blocking the request.")
         return pd.DataFrame()
 
     results = []
@@ -139,65 +137,72 @@ with tab1:
     with col_cap:
         intra_capital = st.slider("Total Buying Power (₹) [Incl. 5X Leverage]", 10000, 1000000, 100000, 10000)
     with col_info:
-        cash_needed = int(intra_capital / 5)
-        st.metric("Required Cash Margin", f"₹{cash_needed:,}")
+        st.metric("Required Cash Margin", f"₹{int(intra_capital / 5):,}")
 
     if st.button("🔥 Scan Intraday Movers"):
         st.session_state.intra_results = run_engine(4.0, use_sma_wall=False)
     
-    if 'intra_results' in st.session_state and not st.session_state.intra_results.empty:
-        df_i = st.session_state.intra_results.copy()
-        df_i['Qty'] = (intra_capital / df_i['LTP']).astype(int)
-        
-        st.dataframe(df_i[['Rank', 'Symbol', 'LTP', 'Max%', 'Sys_SL', 'Qty']], hide_index=True)
-        
-        with st.form("intra_commit"):
-            confirmed = []
-            for _, r in df_i.iterrows():
-                if r['Rank'] == "🔥 LEADER":
-                    if st.checkbox(f"Trade {r['Symbol']} (Qty: {r['Qty']})", key=f"intra_{r['Symbol']}"):
-                        confirmed.append({
-                            'Symbol': r['Symbol'], 'Entry_Price': r['LTP'], 'Qty': r['Qty'], 
-                            'Date': get_now_ist().strftime('%Y-%m-%d %H:%M'), 'Status': 'OPEN'
-                        })
-            if st.form_submit_button("💾 COMMIT TO WAR ROOM"):
-                df_cur = conn.read(worksheet="INTRADAY_PORTFOLIO", ttl=0).dropna(how='all')
-                conn.update(worksheet="INTRADAY_PORTFOLIO", data=pd.concat([df_cur, pd.DataFrame(confirmed)], ignore_index=True))
-                st.success("Committed!"); time.sleep(1); st.rerun()
+    if 'intra_results' in st.session_state:
+        if not st.session_state.intra_results.empty:
+            df_i = st.session_state.intra_results.copy()
+            df_i['Qty'] = (intra_capital / df_i['LTP']).astype(int)
+            
+            st.dataframe(df_i[['Rank', 'Symbol', 'LTP', 'Max%', 'Sys_SL', 'Qty']], hide_index=True)
+            
+            with st.form("intra_commit"):
+                confirmed = []
+                for _, r in df_i.iterrows():
+                    if r['Rank'] == "🔥 LEADER":
+                        if st.checkbox(f"Trade {r['Symbol']} (Qty: {r['Qty']})", key=f"intra_{r['Symbol']}"):
+                            confirmed.append({
+                                'Symbol': r['Symbol'], 'Entry_Price': r['LTP'], 'Qty': r['Qty'], 
+                                'Date': get_now_ist().strftime('%Y-%m-%d %H:%M'), 'Status': 'OPEN'
+                            })
+                if st.form_submit_button("💾 COMMIT TO WAR ROOM"):
+                    df_cur = conn.read(worksheet="INTRADAY_PORTFOLIO", ttl=0).dropna(how='all')
+                    conn.update(worksheet="INTRADAY_PORTFOLIO", data=pd.concat([df_cur, pd.DataFrame(confirmed)], ignore_index=True))
+                    st.success("Committed!"); time.sleep(1); st.rerun()
+        else:
+            st.warning("🚨 0 stocks passed the VWAP Risk Filter. The market is chopping morning breakouts.")
 
     st.write("---")
     st.subheader("🛰️ Active War Room (Live P&L)")
     
     @st.fragment(run_every="120s")
     def live_intra():
-        if not is_market_open():
-            st.warning("😴 Market Closed. Live feeds paused.")
+        if not is_market_open(): st.info("😴 Market Closed. Live feeds paused.")
         try:
             df = conn.read(worksheet="INTRADAY_PORTFOLIO", ttl=0).dropna(how='all')
             active = df[df['Status'].astype(str).str.upper() == 'OPEN'].copy()
             
-            if active.empty:
-                return st.info("No active trades.")
+            if active.empty: return st.write("No active trades.")
 
             # --- Live Position Editor ---
-            with st.expander("📝 Edit Prices / Close Trades"):
-                with st.form("edit_positions"):
+            with st.expander("📝 Edit Prices, Qty & Status"):
+                with st.form("edit_intra_positions"):
                     updated_rows = []
+                    c1, c2, c3, c4 = st.columns([1.5, 1, 1.5, 1])
+                    c1.caption("Symbol"); c2.caption("Qty"); c3.caption("Buy Price"); c4.caption("Status")
+                    
                     for idx, r in active.iterrows():
-                        c1, c2, c3 = st.columns([2, 2, 2])
+                        c1, c2, c3, c4 = st.columns([1.5, 1, 1.5, 1])
                         c1.markdown(f"**{r['Symbol']}**")
-                        new_p = c2.number_input("Entry Price", value=float(r['Entry_Price']), step=0.05, key=f"p_{idx}", label_visibility="collapsed")
-                        new_s = c3.selectbox("Status", ["OPEN", "EXIT"], index=0, key=f"st_{idx}", label_visibility="collapsed")
-                        updated_rows.append({'idx': idx, 'p': new_p, 's': new_s})
+                        curr_qty = int(float(r['Qty'])) if 'Qty' in r and pd.notna(r['Qty']) else 0
+                        
+                        new_q = c2.number_input("Qty", value=curr_qty, step=1, key=f"iq_{idx}", label_visibility="collapsed")
+                        new_p = c3.number_input("Price", value=float(r['Entry_Price']), step=0.05, key=f"ip_{idx}", label_visibility="collapsed")
+                        new_s = c4.selectbox("Status", ["OPEN", "EXIT"], index=0, key=f"ist_{idx}", label_visibility="collapsed")
+                        updated_rows.append({'idx': idx, 'q': new_q, 'p': new_p, 's': new_s})
                     
                     if st.form_submit_button("✅ Update Ledger"):
                         for u in updated_rows:
+                            df.at[u['idx'], 'Qty'] = u['q']
                             df.at[u['idx'], 'Entry_Price'] = u['p']
                             df.at[u['idx'], 'Status'] = u['s']
                         conn.update(worksheet="INTRADAY_PORTFOLIO", data=df)
                         st.rerun()
 
-            # --- Live P&L Calculation Engine ---
+            # --- Live P&L Math ---
             rows = []
             total_session_pnl = 0.0
 
@@ -206,39 +211,31 @@ with tab1:
                 sys_sl = round(vwap - 2.0, 2)
                 
                 entry = float(r['Entry_Price'])
-                qty = int(r.get('Qty', 0))
+                qty = int(float(r['Qty'])) if 'Qty' in r and pd.notna(r['Qty']) else 0
                 rupee_pnl = round((ltp - entry) * qty, 2)
                 total_session_pnl += rupee_pnl
                 
+                # Visual Green/Red String Formatting
+                pnl_display = f"🟢 ₹{rupee_pnl:,.2f}" if rupee_pnl >= 0 else f"🔴 -₹{abs(rupee_pnl):,.2f}"
+                
                 rows.append({
                     "Symbol": r['Symbol'], "Qty": qty, "Entry": entry, 
-                    "LTP": ltp, "VWAP": vwap, "SL (V-2)": sys_sl, 
-                    "Live P&L (₹)": rupee_pnl, 
+                    "LTP": ltp, "SL (V-2)": sys_sl, 
+                    "Live P&L": pnl_display, 
                     "Signal": "✅ HOLD" if ltp > sys_sl else "🚨 EXIT NOW"
                 })
             
-            # --- Display Metrics & Table ---
-            st.metric("Total Session P&L (₹)", f"₹{round(total_session_pnl, 2):,}", delta=f"{round(total_session_pnl, 2)}")
+            # --- Metrics & Display ---
+            st.metric("Total Session P&L", f"₹{round(total_session_pnl, 2):,}", delta=f"{round(total_session_pnl, 2)}")
+            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
             
-            st.dataframe(
-                pd.DataFrame(rows),
-                column_config={
-                    "Live P&L (₹)": st.column_config.NumberColumn("Live P&L (₹)", format="₹ %.2f")
-                },
-                hide_index=True,
-                use_container_width=True
-            )
-            
-            # Auto-alert if something breaks SL
             for r in rows:
-                if "EXIT NOW" in r['Signal']:
-                    st.error(f"🚨 ALERT: {r['Symbol']} has broken the VWAP-2 SL!")
+                if "EXIT NOW" in r['Signal']: st.error(f"🚨 {r['Symbol']} has broken the VWAP-2 SL!")
                     
         except Exception as e:
             st.error(f"War Room Sync Error: {e}")
 
     live_intra()
-
 
 # ==========================================
 # TAB 2: STAGE 2 SWING (Continuity)
@@ -247,10 +244,8 @@ with tab2:
     st.subheader("Step 1: Swing Engine")
     
     col_u, col_b = st.columns([2, 1])
-    with col_u:
-        choice = st.radio("Target Universe:", ["Nifty 500", "Microcap 250"], horizontal=True)
-    with col_b:
-        swing_alloc = st.number_input("Budget Per Stock (₹)", 5000, 500000, 20000, 5000)
+    with col_u: choice = st.radio("Target Universe:", ["Nifty 500", "Microcap 250"], horizontal=True)
+    with col_b: swing_alloc = st.number_input("Budget Per Stock (₹)", 5000, 500000, 20000, 5000)
     
     if st.button(f"🚀 Scan {choice} Leaders"):
         st.session_state.swing_results = run_engine(5.0, use_sma_wall=True, universe=choice)
@@ -283,37 +278,48 @@ with tab2:
         active_sw = df_sw[df_sw['Status'].astype(str).str.upper() == 'OPEN'].copy()
         
         if not active_sw.empty:
-            sw_rows = []
-            for idx, r in active_sw.iterrows():
-                hard, trail, ltp = get_swing_stops(r['Symbol'])
-                entry = float(r['Entry_Price'])
-                qty = int(r.get('Qty', 0))
-                pnl = round((ltp - entry) * qty, 2)
-                sw_rows.append({
-                    "Symbol": r['Symbol'], "Entry": entry, "Qty": qty, "LTP": ltp, 
-                    "P&L (₹)": pnl, "HARD SL": hard, "TRAIL SL": trail
-                })
             
-            # Position Editor for Swing trades
-            with st.expander("📝 Close Swing Trades"):
-                with st.form("edit_swing"):
+            # --- Live Swing Editor ---
+            with st.expander("📝 Edit Swing Prices, Qty & Status"):
+                with st.form("edit_swing_positions"):
                     sw_upd = []
+                    c1, c2, c3, c4 = st.columns([1.5, 1, 1.5, 1])
+                    c1.caption("Symbol"); c2.caption("Qty"); c3.caption("Buy Price"); c4.caption("Status")
+                    
                     for idx, r in active_sw.iterrows():
-                        c1, c2 = st.columns([3, 1])
-                        c1.write(f"{r['Symbol']} - Bought at ₹{r['Entry_Price']}")
-                        s = c2.selectbox("Status", ["OPEN", "EXIT"], index=0, key=f"sws_{idx}", label_visibility="collapsed")
-                        sw_upd.append({'idx': idx, 's': s})
-                    if st.form_submit_button("Update Status"):
+                        c1, c2, c3, c4 = st.columns([1.5, 1, 1.5, 1])
+                        c1.markdown(f"**{r['Symbol']}**")
+                        curr_qty = int(float(r['Qty'])) if 'Qty' in r and pd.notna(r['Qty']) else 0
+                        
+                        new_q = c2.number_input("Qty", value=curr_qty, step=1, key=f"sq_{idx}", label_visibility="collapsed")
+                        new_p = c3.number_input("Price", value=float(r['Entry_Price']), step=0.05, key=f"sp_{idx}", label_visibility="collapsed")
+                        new_s = c4.selectbox("Status", ["OPEN", "EXIT"], index=0, key=f"sst_{idx}", label_visibility="collapsed")
+                        sw_upd.append({'idx': idx, 'q': new_q, 'p': new_p, 's': new_s})
+                    
+                    if st.form_submit_button("✅ Update Swing Ledger"):
                         for u in sw_upd:
+                            df_sw.at[u['idx'], 'Qty'] = u['q']
+                            df_sw.at[u['idx'], 'Entry_Price'] = u['p']
                             df_sw.at[u['idx'], 'Status'] = u['s']
                         conn.update(worksheet="SWING_PORTFOLIO", data=df_sw)
                         st.rerun()
 
-            st.dataframe(
-                pd.DataFrame(sw_rows),
-                column_config={"P&L (₹)": st.column_config.NumberColumn("P&L (₹)", format="₹ %.2f")},
-                hide_index=True, use_container_width=True
-            )
+            # --- Swing P&L Math ---
+            sw_rows = []
+            for idx, r in active_sw.iterrows():
+                hard, trail, ltp = get_swing_stops(r['Symbol'])
+                entry = float(r['Entry_Price'])
+                qty = int(float(r['Qty'])) if 'Qty' in r and pd.notna(r['Qty']) else 0
+                
+                rupee_pnl = round((ltp - entry) * qty, 2)
+                pnl_display = f"🟢 ₹{rupee_pnl:,.2f}" if rupee_pnl >= 0 else f"🔴 -₹{abs(rupee_pnl):,.2f}"
+                
+                sw_rows.append({
+                    "Symbol": r['Symbol'], "Entry": entry, "Qty": qty, "LTP": ltp, 
+                    "P&L": pnl_display, "HARD SL": hard, "TRAIL SL": trail
+                })
+            
+            st.dataframe(pd.DataFrame(sw_rows), hide_index=True, use_container_width=True)
         else:
             st.info("Swing portfolio empty.")
     except Exception as e:
