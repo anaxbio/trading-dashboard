@@ -37,7 +37,7 @@ def get_vwap_data(sym):
         vol_sum = df['Volume'].sum()
         vwap = (df['TP'] * df['Volume']).sum() / vol_sum
         ltp = df['Close'].iloc[-1]
-        hod = df['High'].max() # High of Day for Ratchet Trailing SL
+        hod = df['High'].max() 
         return round(ltp, 2), round(vwap, 2), round(hod, 2)
     except: return 0.0, 0.0, 0.0
 
@@ -123,6 +123,31 @@ def run_engine(threshold, use_sma_wall, universe="Nifty 500"):
         df.loc[0:4, 'Rank'] = "🔥 LEADER"
         df = df.head(8)
     return df
+
+# --- DYNAMIC ETF DISCOVERY ENGINE ---
+@st.cache_data(ttl=86400) # Caches the universe for 24 hours
+def fetch_etf_universe():
+    # Base fallback list to guarantee survival if NSE network fails
+    base_tickers = [
+        "SILVERBEES", "GOLDBEES", "GOLDCASE", "PSUBNKBEES", "METALIETF", "CPSEETF", "MON100", 
+        "AUTOBEES", "BANKBEES", "PHARMABEES", "ITBEES", "MID150BEES", "SMALLCAP", "MOM30IETF", 
+        "ALPHAETF", "LOWVOLETF", "NIFTYBEES", "LIQUIDCASE"
+    ]
+    
+    try:
+        # Dynamically scans the official NSE Master Equity list for any new ETFs
+        url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        r = requests.get(url, headers=headers, timeout=5)
+        if r.status_code == 200:
+            df_nse = pd.read_csv(io.StringIO(r.text))
+            # Finds any stock where the company name explicitly says ETF, BEES, or FUND
+            is_etf = df_nse['NAME OF COMPANY'].str.contains('ETF|BEES|FUND', case=False, na=False)
+            new_etfs = df_nse[is_etf]['SYMBOL'].tolist()
+            base_tickers.extend(new_etfs)
+    except: pass
+    
+    return list(set(base_tickers))
 
 # --- UI TABS ---
 tab1, tab2, tab3 = st.tabs(["🚀 INTRADAY 5X COCKPIT", "📈 STAGE 2 SWING", "🛡️ TACTICAL ETF ALIGNER"])
@@ -336,63 +361,59 @@ with tab2:
 # ==========================================
 with tab3:
     st.subheader("🛡️ Tactical ETF Momentum & Inverse Volatility Aligner")
-    st.markdown("Scans the full 150+ NSE ETF universe, dynamically deduplicates by asset class, and allocates inversely to 63-day volatility.")
+    st.markdown("Dynamically fetches all active NSE ETFs, logically deduplicates by asset class, and allocates inversely to 63-day volatility.")
     
-    raw_tickers = [
-        "SILVERADD", "SILVERIETF", "TATSILV", "AXISILVER", "HDFCSILVER", "SILVERBEES", "SILVER1", "SILVER", "SBISILVER", "ESILVER", 
-        "AXISGOLD", "UNIONGOLD", "QGOLDHALF", "LICMFGOLD", "GOLDIETF", "GOLDCASE", "GOLD1", "BSLGOLDETF", "HDFCGOLD", "GOLDBEES", 
-        "BBNPPGOLD", "SETFGOLD", "IVZINGOLD", "EGOLD", "TATAGOLD", "GOLDETF", "BANKPSU", "PSUBANKADD", "PSUBANK", "HDFCPSUBK", 
-        "PSUBNKIETF", "PSUBNKBEES", "METAL", "METALIETF", "VAL30IETF", "MOVALUE", "GROWWGOLD", "ICICIB22", "CPSEETF", "HNGSNGBEES", 
-        "COMMOIETF", "MONQ50", "MODEFENCE", "AUTOIETF", "AUTOBEES", "MASPTOP50", "ABSLPSE", "MON100", "MAKEINDIA", "MNC", 
-        "EBANKNIFTY", "BBNPNBETF", "ABSLBANETF", "SETFNIFBK", "BANKIETF", "ECAPINSURE", "BANKNIFTY1", "BANKBETF", "BANKETF", 
-        "BANKBEES", "HDFCNIFBAN", "NEXT30ADD", "AXISBNKETF", "OILIETF", "FINIETF", "BFSI", "PHARMABEES", "EQUAL50ADD", "SBINEQWETF", 
-        "HEALTHIETF", "ABSLNN50ET", "AXISHCETF", "HEALTHADD", "DIVOPPBEES", "HDFCPVTBAN", "INFRAIETF", "NEXT50", "HEALTHY", 
-        "SBIETFPB", "PVTBANKADD", "HDFCNEXT50", "SETFNN50", "JUNIORBEES", "INFRABEES", "NPBET", "NEXT50IETF", "PVTBANIETF", 
-        "MIDCAPIETF", "MIDCAP", "MID150CASE", "HDFCMID150", "HDFCBSE500", "MIDCAPETF", "MID150BEES", "MAFANG", "ALPHAETF", 
-        "MOM100", "ALPL30IETF", "GSEC5IETF", "EVINDIA", "GROWWEV", "MOHEALTH", "SDL26BEES", "MOMENTUM", "MOM30IETF", "HDFCMOMENT", 
-        "HDFCLOWVOL", "AXISBPSETF", "EBBETF0430", "GILT5YBEES", "NIF100IETF", "HDFCNIF100", "MOMOMENTUM", "GSEC10YEAR", "LOWVOL", 
-        "BBETF0432", "LOWVOLIETF", "NIF100BEES", "EBBETF0431", "LICNMID100", "LIQUID1", "LIQUIDPLUS", "TOP100CASE", "LIQUIDCASE", 
-        "LIQUIDADD", "ABGSEC", "MSCIINDIA", "LIQUIDBETF", "LICNETFGSC", "IVZINNIFTY", "BSLNIFTY", "LICNETFN50", "BSE500IETF", 
-        "LIQUIDSHRI", "GROWWLIQID", "NETF", "HDFCLIQUID", "NIFTYBETF", "EBBETF0433", "NIFTY1", "LTGILTBEES", "MOLOWVOL", 
-        "NIFTYBEES", "NIFTYETF", "QNIFTY", "AXISNIFTY", "NIFTYIETF", "SETFNIF50", "MOGSEC", "HDFCNIFTY", "MOM50", "IDFNIFTYET", 
-        "ALPHA", "LOWVOL1", "GROWWDEFNC", "MULTICAP", "MONIFTY500", "HDFCVALUE", "MIDSELIETF", "GSEC10IETF", "NV20BEES", 
-        "NV20IETF", "SETF10GILT", "NV20", "GSEC10ABSL", "MOMENTUM50", "LICNFNHGP", "ESG", "AXSENSEX", "BSLSENETFG", "SENSEXIETF", 
-        "SENSEXETF", "HDFCSENSEX", "SENSEXADD", "LICNETFSEN", "HDFCQUAL", "EMULTIMQ", "MOCAPITAL", "MIDQ50ADD", "NIFTYQLITY", 
-        "NIFTY100EW", "QUAL30IETF", "LIQUIDETF", "LIQUID", "LIQUIDIETF", "LIQUIDSBI", "LIQUIDBEES", "ABSLLIQUID", "SBIETFQLTY", 
-        "MIDSMALL", "HDFCGROWTH", "GROWWN200", "CONSUMIETF", "CONSUMBEES", "SBIETFCON", "CONS", "AXISCETF", "AONETOTAL", 
-        "TOP10ADD", "MOSMALL250", "HDFCSML250", "MAHKTECH", "CONSUMER", "SMALLCAP", "SHARIABEES", "FMCGIETF", "GROWWRAIL", 
-        "TNIDETF", "MOREALTY", "TECH", "ITIETF", "AXISTECETF", "ITETF", "ITBEES", "SBIETFIT", "HDFCNIFIT", "IT", "MOQUALITY", 
-        "SILVERETF", "GOLDSHARE", "GOLDETFADD", "UTIBANKETF", "BANKETFADD", "UTINIFTETF", "NIFTY50ADD", "UTISENSETF", 
-        "NIFMID150", "UTISXN50", "NIF5GETF", "NIF10GETF", "UTINEXT50", "NIFITETF", "ITETFADD", "SILVRETF", "EBBETF0425"
-    ]
+    # Get the dynamically auto-updating universe
+    etf_universe = fetch_etf_universe()
     
+    # Strict Hierarchy Auto-Categorizer
     def categorize_etf(sym):
         s = sym.upper()
+        # 1. Commodities
         if 'SILV' in s: return 'SILVER'
         if 'GOLD' in s or 'GLD' in s: return 'GOLD'
-        if 'LIQ' in s or 'GSEC' in s or 'GILT' in s or 'EBB' in s or 'SDL' in s: return 'LIQUID / DEBT'
-        if 'BANK' in s or 'BNK' in s or 'BFSI' in s:
-            if 'PSU' in s: return 'PSU BANK'
-            return 'BANKING'
+        
+        # 2. Liquid / Debt
+        if 'LIQ' in s or 'GSEC' in s or 'GILT' in s or 'EBB' in s or 'SDL' in s or 'CASH' in s: return 'LIQUID / DEBT'
+        
+        # 3. International
+        if 'MON' in s or 'FANG' in s or 'HANG' in s or 'MAHK' in s or 'DEV25' in s or 'WORLD' in s: return 'INTERNATIONAL'
+        
+        # 4. Smart Beta
+        if 'MOM' in s: return 'SMART BETA - MOMENTUM'
+        if 'VOL' in s: return 'SMART BETA - LOW VOL'
+        if 'ALPH' in s: return 'SMART BETA - ALPHA'
+        if 'QUAL' in s: return 'SMART BETA - QUALITY'
+        if 'VAL' in s or 'NV20' in s: return 'SMART BETA - VALUE'
+        if 'EW' in s or 'EQUAL' in s: return 'SMART BETA - EQUAL WEIGHT'
+        
+        # 5. Specific Sectors & Themes
         if 'IT' in s or 'TECH' in s: return 'IT / TECH'
         if 'PHARM' in s or 'HEALTH' in s or 'HC' in s: return 'HEALTHCARE'
-        if 'MID' in s: return 'MIDCAP'
-        if 'SML' in s or 'SMALL' in s: return 'SMALLCAP'
-        if 'NXT' in s or 'NEXT' in s or 'NN50' in s or 'JUNIOR' in s: return 'NEXT 50'
-        if 'MOM' in s or 'VOL' in s or 'ALPH' in s or 'QUAL' in s or 'VAL' in s or 'NV20' in s or 'EW' in s: return 'SMART BETA'
-        if 'CON' in s or 'FMCG' in s: return 'CONSUMPTION'
         if 'AUTO' in s or 'EV' in s: return 'AUTO & EV'
         if 'MET' in s: return 'METALS'
         if 'INF' in s: return 'INFRA'
-        if 'MON' in s or 'FANG' in s or 'HANG' in s or 'MAHK' in s: return 'INTERNATIONAL'
+        if 'CON' in s or 'FMCG' in s: return 'CONSUMPTION'
         if 'DEF' in s: return 'DEFENSE'
         if 'RAIL' in s: return 'RAILWAYS'
-        if 'NIFTY' in s or 'NIF' in s or 'SEN' in s: return 'BROAD MARKET'
-        return 'OTHER / THEMATIC'
         
-    etf_universe = list(set(raw_tickers))
+        # 6. Banking & PSU
+        if 'PSU' in s and ('BNK' in s or 'BANK' in s or 'BK' in s or 'B' in s): return 'PSU BANK'
+        if 'BANKPSU' in s: return 'PSU BANK'
+        if 'BANK' in s or 'BNK' in s or 'BFSI' in s or 'BK' in s: return 'BANKING'
+        if 'CPSE' in s or 'PSE' in s or 'B22' in s: return 'CPSE / PSU'
+        
+        # 7. Market Cap
+        if 'MID' in s: return 'MIDCAP'
+        if 'SML' in s or 'SMALL' in s: return 'SMALLCAP'
+        if 'NXT' in s or 'NEXT' in s or 'NN50' in s or 'JUNIOR' in s: return 'NEXT 50'
+        
+        # 8. Broad Market Fallback
+        if 'NIFTY' in s or 'NIF' in s or 'SEN' in s or 'BSE' in s: return 'BROAD MARKET'
+        
+        return 'OTHER / THEMATIC'
     
-    with st.expander(f"🔍 View the Unrestricted ETF Universe Scanned ({len(etf_universe)} Candidates)"):
+    with st.expander(f"🔍 View the Dynamically Fetched Universe ({len(etf_universe)} Candidates)"):
         st.write(", ".join(sorted(etf_universe)))
     
     col_cash, col_scan = st.columns([1, 1])
@@ -402,7 +423,7 @@ with tab3:
         st.write("") 
         if st.button("🔄 Run Momentum & 63-Day Volatility Scan"):
             st.session_state.run_etf_scan = True 
-            st.session_state.pop("etf_top_6", None) 
+            st.session_state.pop("etf_top_6", None) # Force refresh
         
     st.write("---")
     
@@ -474,7 +495,7 @@ with tab3:
     # 3. Engine & Execution Terminal
     if st.session_state.get('run_etf_scan', False):
         if "etf_top_6" not in st.session_state:
-            prog_etf = st.progress(0, text="Calculating Momentum & 63-Day Volatility...")
+            prog_etf = st.progress(0, text="Fetching Live ETF Market Data...")
             etf_results = []
             
             def calc_63d_vol(sym):
@@ -482,6 +503,10 @@ with tab3:
                     t = yf.Ticker(f"{sym}.NS")
                     hist = t.history(period="1y")
                     if len(hist) < 60: return None
+                    
+                    # 🚨 Liquidity Filter: Prevents illiquid penny-ETFs from hijacking the scan
+                    avg_vol = hist['Volume'].tail(20).mean()
+                    if avg_vol < 5000: return None 
                     
                     p_curr = hist['Close'].iloc[-1]
                     def safe_ret(days):
@@ -498,10 +523,13 @@ with tab3:
                     return {'Category': cat, 'Symbol': sym, 'LTP': round(p_curr, 2), 'Momentum_Score': score, 'Vol_63D': vol_63d, 'Inv_Vol': 1 / vol_63d}
                 except: return None
             
-            for i, sym in enumerate(etf_universe):
-                prog_etf.progress((i+1)/len(etf_universe), text=f"Analyzing {sym}...")
-                res = calc_63d_vol(sym)
-                if res: etf_results.append(res)
+            # Use ThreadPoolExecutor for hyper-fast scanning of all 150+ ETFs
+            with ThreadPoolExecutor(max_workers=25) as executor:
+                futures = [executor.submit(calc_63d_vol, s) for s in etf_universe]
+                for i, f in enumerate(futures):
+                    prog_etf.progress((i+1)/len(etf_universe), text=f"Analyzing {etf_universe[i]}... ({i+1}/{len(etf_universe)})")
+                    res = f.result()
+                    if res: etf_results.append(res)
                 
             prog_etf.empty()
             
@@ -516,11 +544,12 @@ with tab3:
             core_4 = top_6.head(4).copy()
             sum_inv_vol = core_4['Inv_Vol'].sum()
             
+            # Apply Target Weights ONLY to the Core 4
             top_6['Target_Weight_%'] = 0.0
-            for i in range(4):
+            for i in range(len(core_4)):
                 top_6.loc[i, 'Target_Weight_%'] = (top_6.loc[i, 'Inv_Vol'] / sum_inv_vol) * 100
                 
-            top_6['Role'] = ["Core"]*4 + ["Bench"]*2
+            top_6['Role'] = ["Core"]*len(core_4) + ["Bench"]*(len(top_6) - len(core_4))
             
             st.markdown("#### 3. Momentum Leaderboard (Deduplicated Core 4 + Bench 2)")
             st.dataframe(
