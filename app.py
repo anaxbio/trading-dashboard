@@ -193,13 +193,18 @@ with tab1:
             df_i = st.session_state.intra_results.copy()
             df_i['Qty'] = (intra_capital / df_i['LTP']).astype(int)
             
-            st.dataframe(df_i[['Rank', 'Symbol', 'LTP', 'Max%', 'Sys_SL', 'Qty']], hide_index=True)
+            # 🚨 NEW: Calculate Max Rupee Risk based on Initial System SL
+            df_i['Max_Loss (₹)'] = ((df_i['LTP'] - df_i['Sys_SL']) * df_i['Qty']).round(2)
+            
+            # Replaced 'Max%' with 'Max_Loss (₹)' in the dataframe view
+            st.dataframe(df_i[['Rank', 'Symbol', 'LTP', 'Max_Loss (₹)', 'Sys_SL', 'Qty']], hide_index=True)
             
             with st.form("intra_commit"):
                 confirmed = []
                 for _, r in df_i.iterrows():
                     if r['Rank'] == "🔥 LEADER":
-                        if st.checkbox(f"Trade {r['Symbol']} (Qty: {r['Qty']})", key=f"intra_{r['Symbol']}"):
+                        # Updated checkbox to show the Max Risk right next to the trade button
+                        if st.checkbox(f"Trade {r['Symbol']} (Qty: {r['Qty']} | Risk: ₹{r['Max_Loss (₹)']})", key=f"intra_{r['Symbol']}"):
                             confirmed.append({
                                 'Symbol': r['Symbol'], 'Entry_Price': r['LTP'], 'Qty': r['Qty'], 
                                 'Date': get_now_ist().strftime('%Y-%m-%d %H:%M'), 'Status': 'OPEN'
