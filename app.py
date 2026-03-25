@@ -237,7 +237,7 @@ with tab3:
         st.write("") 
         if st.button("🔄 Run Momentum & 63-Day Volatility Scan"):
             st.session_state.run_etf_scan = True 
-            st.session_state.pop("etf_top_6", None) # Force refresh
+            st.session_state.pop("etf_top_6", None)
     
     st.write("---")
     st.markdown("#### 1. JSON Portfolio Inventory")
@@ -404,41 +404,98 @@ with tab4:
     
     col_w, col_c = st.columns([2, 1])
     with col_w:
-        watchlist_str = st.text_area("Tracked Assets (Comma-separated Yahoo Tickers)", value="^NSEI, ^NSEBANK, GOLDM26APR2026.MX, SILVERMIC.MX")
-        watchlist = [x.strip().upper() for x in watchlist_str.split(",") if x.strip()]
+        if "ss_watchlist" not in st.session_state:
+            st.session_state.ss_watchlist = pd.DataFrame({
+                "Yahoo Ticker": ["^NSEI", "^NSEBANK", "GOLDM26APR2026.MX", "SILVERMIC.MX"]
+            })
+        
+        st.caption("📝 Edit Watchlist: Click an empty row to add, or select a row and press Delete to remove.")
+        edited_watchlist = st.data_editor(
+            st.session_state.ss_watchlist, 
+            num_rows="dynamic", 
+            use_container_width=True, 
+            hide_index=True
+        )
+        st.session_state.ss_watchlist = edited_watchlist
+        raw_watchlist = edited_watchlist["Yahoo Ticker"].dropna().astype(str).tolist()
+        watchlist = [x.strip().upper() for x in raw_watchlist if x.strip()]
+
     with col_c:
         ss_capital = st.number_input("Capital Per Trade (₹)", value=100000, step=10000)
+        tf = st.selectbox("Regime Timeframe", ["15m", "1h", "1d"], index=2)
     
-    tf = st.selectbox("Regime Timeframe", ["15m", "1h", "1d"], index=2)
     period_map = {"15m": "60d", "1h": "60d", "1d": "1y"}
 
     if st.button("🛰️ Scan Silent Signal"):
         ss_results = []
+        failed_tickers = []
+        
         prog_ss = st.progress(0, text="Calculating Pivot Trends...")
         with ThreadPoolExecutor(max_workers=5) as ex:
-            futures = [ex.submit(calc_silent_signal, s, tf, period_map[tf]) for s in watchlist]
+            futures = {ex.submit(calc_silent_signal, s, tf, period_map[tf]): s for s in watchlist}
             for i, f in enumerate(futures):
+                ticker_name = futures[f]
                 prog_ss.progress((i+1)/len(watchlist))
                 res = f.result()
-                if res: ss_results.append(res)
+                if res: 
+                    ss_results.append(res)
+                else:
+                    failed_tickers.append(ticker_name)
         prog_ss.empty()
         
+        # --- THE MISSING ASSET CATCHER ---
+        for failed in failed_tickers:
+            ss_results.append({
+                "Symbol": failed, "LTP": 0.0, "Trend": "UNKNOWN", "StopLoss": 0.0, 
+                "ADX": 0.0, "Regime": "ERROR", "Signal": "⚠️ DATA ERROR (<200 bars)"
+            })
+            
         if ss_results:
             df_ss = pd.DataFrame(ss_results)
-            df_ss['Qty'] = (ss_capital / df_ss['LTP']).astype(int)
+            
+            # Risk Math & Explicit Status
+            df_ss['Qty'] = np.where(df_ss['LTP'] > 0, (ss_capital / df_ss['LTP']).astype(int), 0)
             df_ss['Risk/Share'] = abs(df_ss['LTP'] - df_ss['StopLoss']).round(2)
-            df_ss['Risk %'] = ((df_ss['Risk/Share'] / df_ss['LTP']) * 100).round(2)
+            df_ss['Risk %'] = np.where(df_ss['LTP'] > 0, ((df_ss['Risk/Share'] / df_ss['LTP']) * 100).round(2), 0.0)
             df_ss['Total Risk (₹)'] = (df_ss['Risk/Share'] * df_ss['Qty']).round(2)
             
-            display_cols = ['Symbol', 'Signal', 'LTP', 'StopLoss', 'Risk %', 'Total Risk (₹)', 'Qty', 'Regime', 'ADX']
-            st.dataframe(df_ss[display_cols], hide_index=True, use_container_width=True)
+            def get_action_status(row):
+                if "ERROR" in row['Signal']: return row['Signal']
+                if row['Regime'] == "CHOP": return "🚫 NO TRADE (ADX < 20)"
+                if "NEW BUY" in row['Signal']: return "🟢 NEW LONG"
+                if "NEW SELL" in row['Signal']: return "🔴 NEW SHORT"
+                if "HOLDING" in row['Signal']: 
+                    return "⏳ HOLD LONG" if "BULL" in row['Trend'] else "⏳ HOLD SHORT"
+                return row['Signal']
+                
+            df_ss['Action Status'] = df_ss.apply(get_action_status, axis=1)
             
+            # --- COLOR CODING ---
+            def highlight_rows(row):
+                status = str(row['Action Status'])
+                if 'LONG' in status:
+                    return ['color: #00FF00; font-weight: bold'] * len(row)
+                elif 'SHORT' in status:
+                    return ['color: #FF4B4B; font-weight: bold'] * len(row)
+                elif 'NO TRADE' in status:
+                    return ['color: #808080'] * len(row)
+                elif 'ERROR' in status:
+                    return ['color: #FFA500'] * len(row)
+                return [''] * len(row)
+
+            display_cols = ['Symbol', 'Action Status', 'LTP', 'StopLoss', 'Risk %', 'Total Risk (₹)', 'Qty', 'ADX']
+            styled_df = df_ss[display_cols].style.apply(highlight_rows, axis=1)
+            st.dataframe(styled_df, hide_index=True, use_container_width=True)
+            
+            # --- EXECUTION TERMINAL ---
+            st.markdown("#### 📝 Execution Terminal")
             with st.form("ss_commit"):
                 confirmed_ss = []
                 for _, r in df_ss.iterrows():
-                    if "NEW" in r['Signal'] or "HOLDING" in r['Signal']:
-                        direction = "LONG" if ("BUY" in r['Signal'] or "BULL" in r['Trend']) else "SHORT"
+                    if "LONG" in r['Action Status'] or "SHORT" in r['Action Status']:
+                        direction = "LONG" if "LONG" in r['Action Status'] else "SHORT"
                         qty_to_log = r['Qty'] if direction == "LONG" else -r['Qty']
+                        
                         if st.checkbox(f"Execute {direction} on {r['Symbol']} (Qty: {abs(qty_to_log)} | Risk: ₹{r['Total Risk (₹)']})", key=f"ss_{r['Symbol']}"):
                             confirmed_ss.append({
                                 'Symbol': r['Symbol'], 'Timeframe': tf, 'Entry_Price': r['LTP'], 'Qty': qty_to_log, 
@@ -446,12 +503,15 @@ with tab4:
                             })
                 
                 if st.form_submit_button("💾 LOG TO REGIME PORTFOLIO"):
-                    try:
-                        df_cur = conn.read(worksheet="REGIME_PORTFOLIO", ttl=0).dropna(how='all')
-                        conn.update(worksheet="REGIME_PORTFOLIO", data=pd.concat([df_cur, pd.DataFrame(confirmed_ss)], ignore_index=True))
-                        st.success("Committed to Regime Portfolio!"); time.sleep(1); st.rerun()
-                    except Exception as e:
-                        st.error("Error: Make sure you created a worksheet named exactly 'REGIME_PORTFOLIO' in your Google Sheet.")
+                    if confirmed_ss:
+                        try:
+                            df_cur = conn.read(worksheet="REGIME_PORTFOLIO", ttl=0).dropna(how='all')
+                            conn.update(worksheet="REGIME_PORTFOLIO", data=pd.concat([df_cur, pd.DataFrame(confirmed_ss)], ignore_index=True))
+                            st.success("Committed to Regime Portfolio!"); time.sleep(1); st.rerun()
+                        except Exception as e:
+                            st.error("Error: Make sure you created a worksheet named exactly 'REGIME_PORTFOLIO' in your Google Sheet.")
+                    else:
+                        st.info("No trades selected to log.")
 
     st.write("---")
     st.subheader("🛰️ Active Trend War Room (Regime Portfolio)")
@@ -497,7 +557,10 @@ with tab4:
                 if live_data:
                     ltp = live_data['LTP']; live_sl = live_data['StopLoss']
                 else:
-                    ltp = yf.Ticker(f"{sym}.NS").history(period="1d")['Close'].iloc[-1]
+                    try:
+                        ltp = yf.Ticker(f"{sym}.NS").history(period="1d")['Close'].iloc[-1]
+                    except:
+                        ltp = 0.0
                     live_sl = 0.0
 
                 rupee_pnl = round((ltp - entry) * qty, 2)
