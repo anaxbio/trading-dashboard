@@ -3,3 +3,6 @@ pandas
 yfinance
 st-gsheets-connection
 pytz
+requests
+numpy
+pandas-ta
