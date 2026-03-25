@@ -453,10 +453,11 @@ with tab4:
         if ss_results:
             df_ss = pd.DataFrame(ss_results)
             
-            # Risk Math & Explicit Status
-            df_ss['Qty'] = np.where(df_ss['LTP'] > 0, (ss_capital / df_ss['LTP']).astype(int), 0)
+            # --- RISK MATH WITH NAN SAFETY ---
+            safe_ltp = df_ss['LTP'].replace(0, np.nan)
+            df_ss['Qty'] = (ss_capital / safe_ltp).fillna(0).astype(int)
             df_ss['Risk/Share'] = abs(df_ss['LTP'] - df_ss['StopLoss']).round(2)
-            df_ss['Risk %'] = np.where(df_ss['LTP'] > 0, ((df_ss['Risk/Share'] / df_ss['LTP']) * 100).round(2), 0.0)
+            df_ss['Risk %'] = ((df_ss['Risk/Share'] / safe_ltp) * 100).fillna(0).round(2)
             df_ss['Total Risk (₹)'] = (df_ss['Risk/Share'] * df_ss['Qty']).round(2)
             
             def get_action_status(row):
